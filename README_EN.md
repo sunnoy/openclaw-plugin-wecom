@@ -1,6 +1,6 @@
 # OpenClaw WeCom AI Bot Plugin
 
-[简体中文](./README.md) | [English](./README_EN.md)
+[简体中文](https://github.com/sunnoy/openclaw-plugin-wecom/blob/main/README.md) | [English](https://github.com/sunnoy/openclaw-plugin-wecom/blob/main/README_EN.md)
 
 `openclaw-plugin-wecom` is an enterprise WeChat (WeCom) integration plugin specifically developed for the [OpenClaw](https://github.com/sunnoy/openclaw-plugin-wecom) framework. It allows you to seamlessly integrate powerful AI capabilities into WeCom with support for multiple advanced features.
 
