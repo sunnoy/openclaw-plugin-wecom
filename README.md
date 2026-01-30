@@ -7,11 +7,34 @@
 ## ✨ Key Features
 
 - 🌊 **Streaming Output**: Based on the latest WeCom AI Bot streaming mechanism for a smooth typing-like response experience.
-- 🤖 **Dynamic Agent Management**: Automatically creates independent Agent instances for each direct message user and group chat. Each instance has its own workspace, configurations, and conversation history, ensuring data isolation and security.
+- 🤖 **Dynamic Agent Management**: Automatically creates an independent Agent per DM user and per group chat. Each Agent has its own workspace and conversation history, keeping data isolated by default.
 - 👥 **Deep Group Chat Integration**: Supports group message parsing and precise triggering via @mentions.
 - 🛠️ **Enhanced Commands**: Built-in support for common commands (e.g., `/new` for a new session, `/status` to check status) with command allowlist configuration.
 - 🔒 **Security & Authentication**: Full support for WeCom message encryption/decryption, URL verification, and sender identity validation.
 - ⚡ **High-Performance Async Processing**: Uses an asynchronous message processing architecture to ensure high responsiveness of the WeCom gateway even during long-running AI inference.
+
+## 🤖 Dynamic Agent Routing (How it works)
+
+OpenClaw decides which Agent to run by parsing `SessionKey`. This plugin uses that mechanism to provide per-user / per-group isolation:
+
+1. When a WeCom message arrives, the plugin generates a deterministic `agentId`:
+   - DM: `wxwork-dm-<userId>`
+   - Group: `wxwork-group-<chatId>`
+2. The plugin routes the message by setting `SessionKey` to:
+   - `agent:<agentId>:<peerKind>:<peerId>`
+3. OpenClaw extracts `<agentId>` from `SessionKey` and will automatically create / reuse the Agent workspace (typically under `~/.openclaw/workspace-<agentId>` for non-default agents).
+
+If you prefer all WeCom messages to use OpenClaw’s **default Agent**, disable dynamic agents:
+
+```json
+{
+  "channels": {
+    "wxwork": {
+      "dynamicAgents": { "enabled": false }
+    }
+  }
+}
+```
 
 ## 🚀 Quick Start
 
@@ -44,9 +67,8 @@ Add the plugin configuration to your OpenClaw configuration file (e.g., `config.
         "enabled": true,
         "allowlist": ["/new", "/status", "/help", "/compact"]
       },
-      "dynamicAgent": {
-        "enabled": true,
-        "prefix": "wxwork-"
+      "dynamicAgents": {
+        "enabled": true
       }
     }
   }
