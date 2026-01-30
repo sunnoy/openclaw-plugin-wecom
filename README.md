@@ -24,6 +24,24 @@ OpenClaw decides which Agent to run by parsing `SessionKey`. This plugin uses th
    - `agent:<agentId>:<peerKind>:<peerId>`
 3. OpenClaw extracts `<agentId>` from `SessionKey` and will automatically create / reuse the Agent workspace (typically under `~/.openclaw/workspace-<agentId>` for non-default agents).
 
+### Multi-tenant by design
+
+Dynamic agents act like lightweight “tenants”:
+
+- **Per-user / per-group isolation**: each DM user or group chat maps to a dedicated Agent with its own workspace and session store keys.
+- **No extra infra**: no database or tenant registry needed — routing is derived deterministically from the inbound identity.
+
+### Dynamic agent config (local config keys)
+
+All keys live under `channels.wxwork`:
+
+- `dynamicAgents.enabled` (boolean, default: `true`): enable/disable per-user/per-group agents.
+- `dm.createAgentOnFirstMessage` (boolean, default: `true`): whether DMs should use dynamic agents.
+- `groupChat.enabled` (boolean, default: `true`): enable group chat handling.
+- `groupChat.createAgentOnFirstMessage` (boolean, default: `true`): whether group chats should use dynamic agents.
+- `groupChat.requireMention` (boolean, default: `true`): require an @mention to respond in groups.
+- `groupChat.mentionPatterns` (string[], default: `["@"]`): patterns treated as “mention”.
+
 If you prefer all WeCom messages to use OpenClaw’s **default Agent**, disable dynamic agents:
 
 ```json
