@@ -125,6 +125,7 @@
     }
   },
   "plugins": {
+    "deny": ["wecom"],
     "entries": {
       "openclaw-plugin-wecom": {
         "enabled": true
