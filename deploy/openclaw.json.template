@@ -43,7 +43,21 @@
         "workspaceAccess": "rw",
         "docker": {
           "network": "bridge",
-          "readOnlyRoot": true
+          "readOnlyRoot": true,
+          "binds": [
+            "${OPENCLAW_DATA_DIR}/bin:/workspace/bin:ro",
+            "${OPENCLAW_DATA_DIR}/skills:${OPENCLAW_DATA_DIR}/skills:ro"
+          ],
+          "env": {
+            "MFA_TOTP_SECRET_PRI": "${MFA_TOTP_SECRET_PRI}",
+            "MFA_TOTP_SECRET_TX": "${MFA_TOTP_SECRET_TX}",
+            "JMSSH_USER": "${JMSSH_USER}"
+          },
+          "extraHosts": [
+            "private-jumpserver.xylink.com:123.57.205.106",
+            "tx-jumpserver.xylink.com:43.138.7.214",
+            "nones.xylink.com:182.92.6.131"
+          ]
         },
         "prune": {
           "idleHours": 87600,

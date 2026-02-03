@@ -32,6 +32,11 @@ services:
       GATEWAY_BIND: ${GATEWAY_BIND:-lan}
       GATEWAY_AUTH_TOKEN: ${GATEWAY_AUTH_TOKEN}
 
+      # 堡垒机配置 (用于 remote-ops skill)
+      MFA_TOTP_SECRET_PRI: ${MFA_TOTP_SECRET_PRI:-}
+      MFA_TOTP_SECRET_TX: ${MFA_TOTP_SECRET_TX:-}
+      JMSSH_USER: ${JMSSH_USER:-}
+
       # 其他配置
       USER_TIMEZONE: ${USER_TIMEZONE:-Asia/Shanghai}
       TIME_FORMAT: ${TIME_FORMAT:-24}

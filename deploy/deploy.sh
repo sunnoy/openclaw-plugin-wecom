@@ -54,6 +54,13 @@ fi
 # 4. 设置权限
 echo -e "${GREEN}3️⃣  设置目录权限...${NC}"
 sudo chown -R ${DOCKER_USER_ID}:${DOCKER_GROUP_ID} "${OPENCLAW_DATA_DIR}"
+# 确保 skills 和 bin 目录存在
+# 当 OPENCLAW_STATE_DIR=/data/openclaw 时，CONFIG_DIR = /data/openclaw
+# Gateway 会自动识别 CONFIG_DIR/skills 下的 managed skills
+sudo mkdir -p "${OPENCLAW_DATA_DIR}/skills"
+sudo mkdir -p "${OPENCLAW_DATA_DIR}/bin"
+sudo chown -R ${DOCKER_USER_ID}:${DOCKER_GROUP_ID} "${OPENCLAW_DATA_DIR}/skills"
+sudo chown -R ${DOCKER_USER_ID}:${DOCKER_GROUP_ID} "${OPENCLAW_DATA_DIR}/bin"
 echo "  ✓ 权限: ${DOCKER_USER_ID}:${DOCKER_GROUP_ID}"
 echo ""
 
@@ -76,6 +83,26 @@ generate_config() {
     chown ${DOCKER_USER_ID}:${DOCKER_GROUP_ID} "$output"
 }
 
+# 7. 复制自定义 skills 和 bin
+echo -e "${GREEN}5️⃣  复制自定义 Skills 和 Bin...${NC}"
+if [ -d "${SCRIPT_DIR}/skills" ]; then
+    sudo cp -r "${SCRIPT_DIR}/skills"/* "${OPENCLAW_DATA_DIR}/skills/" 2>/dev/null || true
+    sudo chown -R ${DOCKER_USER_ID}:${DOCKER_GROUP_ID} "${OPENCLAW_DATA_DIR}/skills"
+    SKILL_COUNT=$(find "${OPENCLAW_DATA_DIR}/skills" -name "SKILL.md" 2>/dev/null | wc -l)
+    echo "  ✓ 已复制 ${SKILL_COUNT} 个自定义 skills"
+else
+    echo "  ℹ 未找到自定义 skills 目录"
+fi
+if [ -d "${SCRIPT_DIR}/bin" ]; then
+    sudo cp -r "${SCRIPT_DIR}/bin"/* "${OPENCLAW_DATA_DIR}/bin/" 2>/dev/null || true
+    sudo chmod +x "${OPENCLAW_DATA_DIR}/bin"/*
+    sudo chown -R ${DOCKER_USER_ID}:${DOCKER_GROUP_ID} "${OPENCLAW_DATA_DIR}/bin"
+    echo "  ✓ 已复制 bin 目录"
+else
+    echo "  ℹ 未找到 bin 目录"
+fi
+echo ""
+
 if [ "$PLUGIN_INSTALLED" = true ]; then
     # 插件已安装，使用完整配置
     echo "  插件已安装，使用完整配置..."
@@ -94,7 +121,7 @@ fi
 echo ""
 
 # 7. 启动服务
-echo -e "${GREEN}5️⃣  启动 Docker 服务...${NC}"
+echo -e "${GREEN}6️⃣  启动 Docker 服务...${NC}"
 cd "${SCRIPT_DIR}"
 docker compose down 2>/dev/null || true
 docker compose up -d
