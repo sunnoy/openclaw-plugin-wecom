@@ -17,6 +17,7 @@ pnpm-debug.log*
 *.patch
 *.swp
 *.swo
+*.tgz
 local.md
 local.sh
 test.sh
