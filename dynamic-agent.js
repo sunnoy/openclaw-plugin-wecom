@@ -37,6 +37,9 @@ export function getDynamicAgentConfig(config) {
     const wecom = config?.channels?.wecom || {};
     return {
         enabled: wecom.dynamicAgents?.enabled !== false,
+        
+        // 主账号列表（这些用户不走动态 Agent，可绕过命令白名单）
+        mainUsers: wecom.dynamicAgents?.mainUsers || [],
 
         // 私聊配置
         dmCreateAgent: wecom.dm?.createAgentOnFirstMessage !== false,
@@ -48,6 +51,26 @@ export function getDynamicAgentConfig(config) {
         groupCreateAgent: wecom.groupChat?.createAgentOnFirstMessage !== false,
         groupHistoryLimit: wecom.groupChat?.historyLimit || 10,
     };
+}
+
+/**
+ * 检查用户是否在主账号列表中
+ * 主账号不走动态 Agent，且可绕过命令白名单
+ * 
+ * @param {string} userId - 用户ID
+ * @param {Object} config - openclaw 配置
+ * @returns {boolean}
+ */
+export function isMainUser(userId, config) {
+    const dynamicConfig = getDynamicAgentConfig(config);
+    const mainUsers = dynamicConfig.mainUsers;
+    
+    if (!Array.isArray(mainUsers) || mainUsers.length === 0) {
+        return false;
+    }
+    
+    const normalizedUserId = String(userId).toLowerCase().trim();
+    return mainUsers.some(u => String(u).toLowerCase().trim() === normalizedUserId);
 }
 
 /**

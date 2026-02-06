@@ -6,6 +6,7 @@ import {
   getDynamicAgentConfig,
   shouldTriggerGroupResponse,
   extractGroupMessageContent,
+  isMainUser,
 } from "./dynamic-agent.js";
 
 
@@ -49,9 +50,10 @@ function getCommandConfig(config) {
  * 检查命令是否在白名单中
  * @param {string} message - 用户消息
  * @param {Object} config - 配置
+ * @param {string} userId - 发送者用户ID（主账号可绕过白名单）
  * @returns {{ isCommand: boolean, allowed: boolean, command: string | null }}
  */
-function checkCommandAllowlist(message, config) {
+function checkCommandAllowlist(message, config, userId) {
   const trimmed = message.trim();
 
   // 不是斜杠命令
@@ -66,6 +68,11 @@ function checkCommandAllowlist(message, config) {
 
   // 如果白名单功能禁用，允许所有命令
   if (!cmdConfig.enabled) {
+    return { isCommand: true, allowed: true, command };
+  }
+
+  // 主账号（mainUsers）不受白名单限制
+  if (isMainUser(userId, config)) {
     return { isCommand: true, allowed: true, command };
   }
 
@@ -808,7 +815,7 @@ async function processInboundMessage({ message, streamId, timestamp, nonce, acco
   // ========================================================================
   // 命令白名单检查
   // ========================================================================
-  const commandCheck = checkCommandAllowlist(rawBody, config);
+  const commandCheck = checkCommandAllowlist(rawBody, config, senderId);
 
   if (commandCheck.isCommand && !commandCheck.allowed) {
     // 命令不在白名单中，返回拒绝消息
