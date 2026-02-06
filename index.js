@@ -150,7 +150,7 @@ async function downloadAndDecryptImage(imageUrl, encodingAesKey, token) {
  * @param {string} fileName - Original file name
  * @param {string} encodingAesKey - AES key for decryption
  * @param {string} token - Token for decryption
- * @returns {Promise<string>} Local path to decrypted file
+ * @returns {Promise<{localPath: string, effectiveFileName: string}>} Local path and resolved filename
  */
 async function downloadWecomFile(fileUrl, fileName, encodingAesKey, token) {
   if (!existsSync(MEDIA_CACHE_DIR)) {
@@ -187,7 +187,7 @@ async function downloadWecomFile(fileUrl, fileName, encodingAesKey, token) {
   writeFileSync(localPath, decryptedBuffer);
 
   logger.info("File decrypted and saved", { path: localPath, size: decryptedBuffer.length });
-  return localPath;
+  return { localPath, effectiveFileName: effectiveFileName || fileName };
 }
 
 /**
@@ -1413,10 +1413,10 @@ async function processInboundMessage({
   // Handle file attachment.
   if (fileUrl) {
     try {
-      const localFilePath = await downloadWecomFile(fileUrl, fileName, account.encodingAesKey, account.token);
+      const { localPath: localFilePath, effectiveFileName } = await downloadWecomFile(fileUrl, fileName, account.encodingAesKey, account.token);
       ctxBase.MediaPaths = [...(ctxBase.MediaPaths || []), localFilePath];
-      ctxBase.MediaTypes = [...(ctxBase.MediaTypes || []), guessMimeType(fileName)];
-      logger.info("File attachment prepared", { path: localFilePath, name: fileName });
+      ctxBase.MediaTypes = [...(ctxBase.MediaTypes || []), guessMimeType(effectiveFileName)];
+      logger.info("File attachment prepared", { path: localFilePath, name: effectiveFileName });
     } catch (e) {
       logger.warn("File download failed", { error: e.message });
       // Inform the agent about the file via text.
