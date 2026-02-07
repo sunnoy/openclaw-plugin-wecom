@@ -22,6 +22,9 @@
     "peerDependencies": {
         "openclaw": "*"
     },
+    "scripts": {
+        "test": "node --test tests/*.test.js"
+    },
     "openclaw": {
         "extensions": [
             "./index.js"
