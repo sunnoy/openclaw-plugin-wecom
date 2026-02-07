@@ -1473,9 +1473,16 @@ async function processInboundMessage({
             });
 
             // Mark stream complete on final payload.
+            // Delay closing stream to allow outbound messages (e.g., subagent notifications)
+            // time to be delivered before stream is finalized.
             if (streamId && info.kind === "final") {
-              await streamManager.finishStream(streamId);
-              logger.info("WeCom stream finished", { streamId });
+              setTimeout(async () => {
+                if (streamManager.hasStream(streamId)) {
+                  await streamManager.finishStream(streamId);
+                  unregisterActiveStream(streamKey, streamId);
+                  logger.info("WeCom stream finished (delayed)", { streamId });
+                }
+              }, 5000); // 5 second delay for outbound messages
             }
           },
           onError: async (err, info) => {
@@ -1487,14 +1494,16 @@ async function processInboundMessage({
     });
 
     // Safety net: ensure stream finishes after dispatch.
+    // Note: Stream closing is delayed in dispatcher callback to allow outbound messages.
+    // This safety net only closes streams that weren't properly finalized.
     if (streamId) {
       const stream = streamManager.getStream(streamId);
       if (!stream || stream.finished) {
         unregisterActiveStream(streamKey, streamId);
       } else {
-        await streamManager.finishStream(streamId);
-        unregisterActiveStream(streamKey, streamId);
-        logger.info("WeCom stream finished (safety net)", { streamId });
+        // Only close if already finished or stream manager indicates done.
+        // Let the delayed close in dispatcher handle most cases.
+        logger.debug("WeCom safety net: skipping auto-close (delayed close in dispatcher)", { streamId });
       }
     }
   }).catch(async (err) => {
