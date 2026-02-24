@@ -1395,9 +1395,14 @@ async function processInboundMessage({
   });
 
   // Override default route with deterministic dynamic agent session key.
+  // For admin users or when dynamic agent is disabled, use main session.
   if (targetAgentId) {
     route.agentId = targetAgentId;
     route.sessionKey = `agent:${targetAgentId}:${peerKind}:${peerId}`;
+  } else if (senderIsAdmin || !shouldUseDynamicAgent({ chatType: peerKind, config })) {
+    // Admin user or dynamic agent disabled - use main session
+    route.agentId = "main";
+    route.sessionKey = "agent:main:main";
   }
 
   // Build inbound context
