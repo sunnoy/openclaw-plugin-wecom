@@ -29,7 +29,8 @@ export function getRuntime() {
 }
 
 export function setOpenclawConfig(config) {
-  runtimeState.openclawConfig = config;
+  // 在设置时统一解析配置中的环境变量占位符 ${VAR}
+  runtimeState.openclawConfig = resolveEnvVars(config);
 }
 
 export function getOpenclawConfig() {
@@ -49,13 +50,33 @@ export function setEnsureDynamicAgentWriteQueue(queuePromise) {
 }
 
 /**
- * 替换配置值中的环境变量占位符 ${VAR}
+ * 递归替换配置值中的环境变量占位符 ${VAR}
+ * - 字符串：替换其中的 ${VAR} 为 process.env.VAR（不存在则保留原样）
+ * - 数组：对每一项递归处理
+ * - 普通对象：对每个属性递归处理
  */
 function resolveEnvVars(value) {
-  if (typeof value !== 'string') return value;
-  return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
-    return process.env[envVar] || match;
-  });
+  if (typeof value === "string") {
+    return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
+      return Object.prototype.hasOwnProperty.call(process.env, envVar)
+        ? process.env[envVar]
+        : match;
+    });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveEnvVars(item));
+  }
+
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = resolveEnvVars(val);
+    }
+    return result;
+  }
+
+  return value;
 }
 
 
@@ -68,17 +89,16 @@ export function resolveAgentConfig() {
   const wecom = config?.channels?.wecom;
   const agent = wecom?.agent;
 
-  // 替换环境变量占位符
-  const corpId = resolveEnvVars(agent?.corpId);
-  const corpSecret = resolveEnvVars(agent?.corpSecret);
-  const agentId = resolveEnvVars(agent?.agentId);
-  
-  
-  if (!agent?.corpId || !agent?.corpSecret || !agent?.agentId) return null;
+  // setOpenclawConfig 已经做了环境变量解析，这里直接使用解析后的值
+  const corpId = agent?.corpId;
+  const corpSecret = agent?.corpSecret;
+  const agentId = agent?.agentId;
+
+  if (!corpId || !corpSecret || !agentId) return null;
   return {
-    corpId: agent.corpId,
-    corpSecret: agent.corpSecret,
-    agentId: agent.agentId,
+    corpId,
+    corpSecret,
+    agentId,
   };
 }
 
