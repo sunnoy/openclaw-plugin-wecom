@@ -1,14 +1,15 @@
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { readFile, access } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
 import { agentSendText, agentUploadMedia, agentSendMedia } from "./agent-api.js";
 import { parseResponseUrlResult } from "./response-url.js";
 import { resolveAgentConfig, responseUrls, streamContext } from "./state.js";
 import { resolveActiveStream } from "./stream-utils.js";
+import { resolveAgentWorkspaceDirLocal } from "./workspace-template.js";
 import { THINKING_PLACEHOLDER } from "./constants.js";
 
-export async function deliverWecomReply({ payload, senderId, streamId }) {
+export async function deliverWecomReply({ payload, senderId, streamId, agentId }) {
   const text = payload.text || "";
 
   logger.debug("deliverWecomReply called", {
@@ -187,6 +188,100 @@ export async function deliverWecomReply({ payload, senderId, streamId }) {
             streamManager.appendStream(streamId, `\n\n${noAgentHint}`);
           } else {
             processedText = processedText ? `${processedText}\n\n${noAgentHint}` : noAgentHint;
+          }
+        }
+      }
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Auto-detect /workspace/… file paths in LLM reply text.
+  // The sandbox container mounts /workspace → host ~/.openclaw/workspace-{agentId}.
+  // When the LLM mentions a file path like "/workspace/report.pdf", we resolve
+  // the host-side path, verify the file exists, and send it via Agent DM.
+  // ──────────────────────────────────────────────────────────────────────────
+  const effectiveAgentId = agentId || streamContext.getStore()?.agentId;
+  if (effectiveAgentId && processedText) {
+    // Match /workspace/ paths (non-greedy: stop at whitespace, quotes, backticks,
+    // angle brackets, parentheses, or end of string).
+    const workspacePathRegex = /\/workspace\/[^\s"'`<>()]+/g;
+    const detectedPaths = [];
+    let wpMatch;
+    while ((wpMatch = workspacePathRegex.exec(processedText)) !== null) {
+      const rawPath = wpMatch[0]
+        // Strip trailing punctuation that is likely not part of the filename.
+        .replace(/[.,;:!?。，；：！？）》」』\]]+$/, "");
+      if (rawPath.length > "/workspace/".length) {
+        detectedPaths.push(rawPath);
+      }
+    }
+
+    if (detectedPaths.length > 0) {
+      const workspaceDir = resolveAgentWorkspaceDirLocal(effectiveAgentId);
+      const agentCfgAuto = resolveAgentConfig();
+      const imageExtsAuto = new Set(["jpg", "jpeg", "png", "gif", "bmp", "webp"]);
+
+      for (const wsPath of detectedPaths) {
+        // /workspace/foo.pdf → hostDir/foo.pdf
+        const relativePath = wsPath.replace(/^\/workspace\/?/, "");
+        if (!relativePath) continue;
+        const hostPath = join(workspaceDir, relativePath);
+        const filename = basename(hostPath);
+        const ext = filename.split(".").pop()?.toLowerCase() || "";
+
+        // Skip image files — they are handled by the stream msg_item mechanism.
+        if (imageExtsAuto.has(ext)) continue;
+
+        // Check file existence on host.
+        try {
+          await access(hostPath);
+        } catch {
+          logger.debug("Auto-detect: workspace file not found on host, skipping", {
+            wsPath,
+            hostPath,
+          });
+          continue;
+        }
+
+        // File exists on host — send via Agent DM.
+        if (agentCfgAuto && senderId) {
+          try {
+            const fileBuf = await readFile(hostPath);
+            const uploadedId = await agentUploadMedia({
+              agent: agentCfgAuto,
+              type: "file",
+              buffer: fileBuf,
+              filename,
+            });
+            await agentSendMedia({
+              agent: agentCfgAuto,
+              toUser: senderId,
+              mediaId: uploadedId,
+              mediaType: "file",
+            });
+            // Replace the path mention in text with a delivery hint.
+            processedText = processedText.replace(
+              wsPath,
+              `📎 文件「${filename}」已通过私信发送给您`,
+            );
+            logger.info("Auto-detect: sent workspace file via Agent DM", {
+              streamId,
+              wsPath,
+              hostPath,
+              filename,
+              senderId,
+            });
+          } catch (autoErr) {
+            processedText = processedText.replace(
+              wsPath,
+              `⚠️ 文件「${filename}」发送失败：${autoErr.message}`,
+            );
+            logger.error("Auto-detect: failed to send workspace file via Agent DM", {
+              streamId,
+              wsPath,
+              hostPath,
+              error: autoErr.message,
+            });
           }
         }
       }

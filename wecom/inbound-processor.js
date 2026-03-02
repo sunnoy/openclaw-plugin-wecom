@@ -428,7 +428,7 @@ export async function processInboundMessage({
 
     // Dispatch reply with AI processing.
     // Wrap in streamContext so outbound adapters resolve the correct stream.
-    await streamContext.run({ streamId, streamKey }, async () => {
+    await streamContext.run({ streamId, streamKey, agentId: route.agentId }, async () => {
       await core.reply.dispatchReplyWithBufferedBlockDispatcher({
         ctx: ctxPayload,
         cfg: config,
@@ -453,6 +453,7 @@ export async function processInboundMessage({
                 payload,
                 senderId: streamKey,
                 streamId,
+                agentId: route.agentId,
               });
             } catch (deliverErr) {
               logger.error("WeCom: deliverWecomReply threw, continuing to finalize stream", {
