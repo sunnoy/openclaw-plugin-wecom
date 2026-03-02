@@ -166,6 +166,19 @@ export async function processInboundMessage({
     senderId,
   });
 
+  // ── Quoted message context ────────────────────────────────────────
+  // When the user replies to (quotes) a previous message, prepend the
+  // quoted content so the LLM sees the full conversational context.
+  const quote = message.quote;
+  if (quote && quote.content) {
+    const quoteLabel = quote.msgType === "image" ? "[引用图片]" : `> ${quote.content}`;
+    rawBody = `${quoteLabel}\n\n${rawBody}`;
+    logger.debug("WeCom: prepended quoted message context", {
+      quoteType: quote.msgType,
+      quotePreview: quote.content.substring(0, 60),
+    });
+  }
+
   // Skip empty messages, but allow image/mixed/file messages.
   if (!rawBody.trim() && !imageUrl && imageUrls.length === 0 && !fileUrl) {
     logger.debug("WeCom: empty message, skipping", { msgType });

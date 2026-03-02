@@ -4,66 +4,134 @@ import { WecomCrypto } from "../crypto.js";
 import { logger } from "../logger.js";
 import { MEDIA_CACHE_DIR } from "./constants.js";
 
+// ── Magic-byte signatures for common file formats ───────────────────────────
+const MAGIC_SIGNATURES = [
+  { magic: [0xff, 0xd8, 0xff], ext: "jpg" },                // JPEG
+  { magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a], ext: "png" }, // PNG
+  { magic: [0x47, 0x49, 0x46, 0x38], ext: "gif" },          // GIF
+  { magic: [0x25, 0x50, 0x44, 0x46], ext: "pdf" },          // %PDF
+  { magic: [0x50, 0x4b, 0x03, 0x04], ext: "zip" },          // PK (ZIP / DOCX / XLSX / PPTX)
+  { magic: [0x50, 0x4b, 0x05, 0x06], ext: "zip" },          // PK (empty ZIP)
+  { magic: [0xd0, 0xcf, 0x11, 0xe0], ext: "doc" },          // OLE2 (DOC / XLS / PPT)
+  { magic: [0x52, 0x61, 0x72, 0x21], ext: "rar" },          // Rar!
+  { magic: [0x1f, 0x8b], ext: "gz" },                       // gzip
+  { magic: [0x42, 0x4d], ext: "bmp" },                      // BMP
+  { magic: [0x49, 0x44, 0x33], ext: "mp3" },                // ID3 (MP3)
+  { magic: [0x00, 0x00, 0x00], ext: "mp4" },                // ftyp box (loose)
+  { magic: [0x52, 0x49, 0x46, 0x46], ext: "wav" },          // RIFF (WAV / AVI)
+];
+
 /**
- * Download and decrypt a WeCom encrypted image.
- * @param {string} imageUrl - Encrypted image URL from WeCom
+ * Check whether a buffer looks like a recognisable (plain) file by inspecting
+ * its leading magic bytes.  Returns the matched extension or `null`.
+ */
+function detectMagic(buf) {
+  if (!buf || buf.length < 4) return null;
+  for (const sig of MAGIC_SIGNATURES) {
+    if (buf.length >= sig.magic.length && sig.magic.every((b, i) => buf[i] === b)) {
+      return sig.ext;
+    }
+  }
+  return null;
+}
+
+/**
+ * Conditionally decrypt a buffer.
+ *
+ * WeCom encrypts media with AES-256-CBC in Agent mode, but in some Bot (AI
+ * 机器人) configurations the file URL returns an **unencrypted** payload.
+ * Blindly decrypting an already-plain file corrupts it (#44).
+ *
+ * Strategy:
+ *   1. If raw bytes already match a known file signature → skip decrypt.
+ *   2. Otherwise attempt AES-256-CBC decryption.
+ *   3. If decryption throws or the result has no recognisable signature,
+ *      fall back to the original bytes (best-effort).
+ */
+function smartDecrypt(rawBuffer, encodingAesKey, token) {
+  const plainExt = detectMagic(rawBuffer);
+  if (plainExt) {
+    logger.info("Media is already plain (skip decrypt)", { magic: plainExt, size: rawBuffer.length });
+    return { buffer: rawBuffer, decrypted: false };
+  }
+
+  try {
+    const crypto = new WecomCrypto(token, encodingAesKey);
+    const dec = crypto.decryptMedia(rawBuffer);
+    logger.info("Media decrypted", { inputSize: rawBuffer.length, outputSize: dec.length });
+    return { buffer: dec, decrypted: true };
+  } catch (e) {
+    logger.warn("Decrypt failed, using raw bytes", { error: e.message, size: rawBuffer.length });
+    return { buffer: rawBuffer, decrypted: false };
+  }
+}
+
+// ── Image helpers ───────────────────────────────────────────────────────────
+
+function detectImageExt(buf) {
+  if (buf[0] === 0x89 && buf[1] === 0x50) return "png";
+  if (buf[0] === 0x47 && buf[1] === 0x49) return "gif";
+  return "jpg";
+}
+
+/**
+ * Download and (conditionally) decrypt a WeCom image.
+ * @param {string} imageUrl - Image URL from WeCom callback
  * @param {string} encodingAesKey - AES key
  * @param {string} token - Token
- * @returns {Promise<{ localPath: string, mimeType: string }>} Local path and mime type
+ * @returns {Promise<{ localPath: string, mimeType: string }>}
  */
 export async function downloadAndDecryptImage(imageUrl, encodingAesKey, token) {
   if (!existsSync(MEDIA_CACHE_DIR)) {
     mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
   }
 
-  logger.info("Downloading encrypted image", { url: imageUrl.substring(0, 80) });
+  logger.info("Downloading image", { url: imageUrl.substring(0, 80) });
   const response = await fetch(imageUrl);
   if (!response.ok) {
     throw new Error(`Failed to download image: ${response.status}`);
   }
-  const encryptedBuffer = Buffer.from(await response.arrayBuffer());
-  logger.debug("Downloaded encrypted image", { size: encryptedBuffer.length });
+  const rawBuffer = Buffer.from(await response.arrayBuffer());
+  logger.debug("Downloaded image bytes", { size: rawBuffer.length });
 
-  const wecomCrypto = new WecomCrypto(token, encodingAesKey);
-  const decryptedBuffer = wecomCrypto.decryptMedia(encryptedBuffer);
+  const { buffer: finalBuffer } = smartDecrypt(rawBuffer, encodingAesKey, token);
 
-  // Detect image type via magic bytes.
-  let ext = "jpg";
-  if (decryptedBuffer[0] === 0x89 && decryptedBuffer[1] === 0x50) {
-    ext = "png";
-  } else if (decryptedBuffer[0] === 0x47 && decryptedBuffer[1] === 0x49) {
-    ext = "gif";
-  }
-
+  const ext = detectImageExt(finalBuffer);
   const filename = `wecom_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
   const localPath = join(MEDIA_CACHE_DIR, filename);
-  writeFileSync(localPath, decryptedBuffer);
+  writeFileSync(localPath, finalBuffer);
 
   const mimeType = ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : "image/jpeg";
-  logger.info("Image decrypted and saved", { path: localPath, size: decryptedBuffer.length, mimeType });
+  logger.info("Image saved", { path: localPath, size: finalBuffer.length, mimeType });
   return { localPath, mimeType };
 }
 
+// ── File helpers ────────────────────────────────────────────────────────────
+
 /**
- * Download and decrypt a file from WeCom.
- * Note: WeCom encrypts ALL media files (not just images) with AES-256-CBC.
+ * Download and (conditionally) decrypt a file from WeCom.
+ *
+ * In Agent mode WeCom encrypts all media with AES-256-CBC; in Bot mode the
+ * file URL may return plain bytes.  This function auto-detects the case and
+ * only decrypts when necessary, preventing file corruption (#44).
+ *
  * @param {string} fileUrl - File download URL
  * @param {string} fileName - Original file name
  * @param {string} encodingAesKey - AES key for decryption
  * @param {string} token - Token for decryption
- * @returns {Promise<{ localPath: string, effectiveFileName: string }>} Local path and resolved filename
+ * @returns {Promise<{ localPath: string, effectiveFileName: string }>}
  */
 export async function downloadWecomFile(fileUrl, fileName, encodingAesKey, token) {
   if (!existsSync(MEDIA_CACHE_DIR)) {
     mkdirSync(MEDIA_CACHE_DIR, { recursive: true });
   }
 
-  logger.info("Downloading encrypted file", { url: fileUrl.substring(0, 80), name: fileName });
+  logger.info("Downloading file", { url: fileUrl.substring(0, 80), name: fileName });
   const response = await fetch(fileUrl);
   if (!response.ok) {
     throw new Error(`Failed to download file: ${response.status}`);
   }
-  const encryptedBuffer = Buffer.from(await response.arrayBuffer());
+  const rawBuffer = Buffer.from(await response.arrayBuffer());
 
   // Try to extract filename from Content-Disposition header if not provided
   let effectiveFileName = fileName;
@@ -79,15 +147,20 @@ export async function downloadWecomFile(fileUrl, fileName, encodingAesKey, token
     }
   }
 
-  // Decrypt the file (WeCom encrypts all media the same way as images)
-  const wecomCrypto = new WecomCrypto(token, encodingAesKey);
-  const decryptedBuffer = wecomCrypto.decryptMedia(encryptedBuffer);
+  // Smart decrypt: only decrypt if the raw bytes are not already a valid file.
+  const { buffer: finalBuffer, decrypted } = smartDecrypt(rawBuffer, encodingAesKey, token);
+  logger.info("File processed", {
+    name: effectiveFileName,
+    rawSize: rawBuffer.length,
+    finalSize: finalBuffer.length,
+    wasDecrypted: decrypted,
+  });
 
   const safeName = (effectiveFileName || `file_${Date.now()}`).replace(/[/\\:*?"<>|]/g, "_");
   const localPath = join(MEDIA_CACHE_DIR, `${Date.now()}_${safeName}`);
-  writeFileSync(localPath, decryptedBuffer);
+  writeFileSync(localPath, finalBuffer);
 
-  logger.info("File decrypted and saved", { path: localPath, size: decryptedBuffer.length });
+  logger.info("File saved", { path: localPath, size: finalBuffer.length });
   return { localPath, effectiveFileName: effectiveFileName || fileName };
 }
 
