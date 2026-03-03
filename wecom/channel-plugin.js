@@ -8,10 +8,17 @@ import { listAccountIds, resolveAccount, detectAccountConflicts } from "./accoun
 import { DEFAULT_ACCOUNT_ID, THINKING_PLACEHOLDER } from "./constants.js";
 import { parseResponseUrlResult } from "./response-url.js";
 import { messageBuffers, resolveAgentConfig, resolveWebhookUrl, responseUrls, streamContext } from "./state.js";
-import { resolveActiveStream } from "./stream-utils.js";
+import { resolveRecoverableStream, unregisterActiveStream } from "./stream-utils.js";
 import { resolveWecomTarget } from "./target.js";
 import { webhookSendImage, webhookSendText, webhookUploadFile, webhookSendFile } from "./webhook-bot.js";
 import { registerWebhookTarget } from "./webhook-targets.js";
+
+const AGENT_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
+
+export function resolveAgentMediaTypeFromFilename(filename) {
+  const ext = filename.split(".").pop()?.toLowerCase() || "";
+  return AGENT_IMAGE_EXTS.has(ext) ? "image" : "file";
+}
 
 export const wecomChannelPlugin = {
   id: "wecom",
@@ -259,7 +266,7 @@ export const wecomChannelPlugin = {
 
       // Prefer stream from async context (correct for concurrent processing).
       const ctx = streamContext.getStore();
-      const streamId = ctx?.streamId ?? resolveActiveStream(userId);
+      const streamId = ctx?.streamId ?? resolveRecoverableStream(userId);
 
       // Layer 1: Active stream (normal path)
       if (streamId && streamManager.hasStream(streamId) && !streamManager.getStream(streamId)?.finished) {
@@ -377,7 +384,7 @@ export const wecomChannelPlugin = {
 
       // Prefer stream from async context (correct for concurrent processing).
       const ctx = streamContext.getStore();
-      const streamId = ctx?.streamId ?? resolveActiveStream(userId);
+      const streamId = ctx?.streamId ?? resolveRecoverableStream(userId);
 
       if (streamId && streamManager.hasStream(streamId)) {
         // Check if mediaUrl is a local path (sandbox: prefix or absolute path)
@@ -575,6 +582,7 @@ export const wecomChannelPlugin = {
       if (agentConfig) {
         try {
           const agentTarget = (target && !target.webhook) ? target : resolveWecomTarget(to) || { toUser: userId };
+          let deliveredFilename = "file";
 
           // Determine if mediaUrl is a local file path.
           let absolutePath = mediaUrl;
@@ -587,9 +595,11 @@ export const wecomChannelPlugin = {
             // Upload local file then send via Agent API.
             const buffer = await readFile(absolutePath);
             const filename = basename(absolutePath);
+            deliveredFilename = filename;
+            const uploadType = resolveAgentMediaTypeFromFilename(filename);
             const mediaId = await agentUploadMedia({
               agent: agentConfig,
-              type: "image",
+              type: uploadType,
               buffer,
               filename,
             });
@@ -597,16 +607,25 @@ export const wecomChannelPlugin = {
               agent: agentConfig,
               ...agentTarget,
               mediaId,
-              mediaType: "image",
+              mediaType: uploadType,
             });
           } else {
             // For external URLs, download first then upload.
             const res = await fetch(mediaUrl);
+            if (!res.ok) {
+              throw new Error(`download media failed: ${res.status}`);
+            }
             const buffer = Buffer.from(await res.arrayBuffer());
-            const filename = basename(new URL(mediaUrl).pathname) || "image.png";
+            const filename = basename(new URL(mediaUrl).pathname) || "file";
+            deliveredFilename = filename;
+            let uploadType = resolveAgentMediaTypeFromFilename(filename);
+            const contentType = res.headers.get("content-type") || "";
+            if (uploadType === "file" && contentType.toLowerCase().startsWith("image/")) {
+              uploadType = "image";
+            }
             const mediaId = await agentUploadMedia({
               agent: agentConfig,
-              type: "image",
+              type: uploadType,
               buffer,
               filename,
             });
@@ -614,13 +633,37 @@ export const wecomChannelPlugin = {
               agent: agentConfig,
               ...agentTarget,
               mediaId,
-              mediaType: "image",
+              mediaType: uploadType,
             });
           }
 
           // Also send accompanying text if present.
           if (text) {
             await agentSendText({ agent: agentConfig, ...agentTarget, text });
+          }
+
+          // Best-effort stream recovery: when async context is missing and the
+          // active stream mapping was already cleaned, still clear "thinking..."
+          // in the most recent stream for this user.
+          const recoverStreamId = resolveRecoverableStream(userId);
+          if (recoverStreamId && streamManager.hasStream(recoverStreamId)) {
+            const recoverStream = streamManager.getStream(recoverStreamId);
+            if (recoverStream && !recoverStream.finished) {
+              const deliveryHint = text
+                ? `${text}\n\n📎 文件已通过私信发送给您：${deliveredFilename}`
+                : `📎 文件已通过私信发送给您：${deliveredFilename}`;
+              streamManager.replaceIfPlaceholder(
+                recoverStreamId,
+                deliveryHint,
+                THINKING_PLACEHOLDER,
+              );
+              await streamManager.finishStream(recoverStreamId);
+              unregisterActiveStream(userId, recoverStreamId);
+              logger.info("WeCom: recovered and finished stream after media fallback", {
+                userId,
+                streamId: recoverStreamId,
+              });
+            }
           }
 
           logger.info("WeCom: sent media via Agent API fallback (sendMedia)", {

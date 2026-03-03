@@ -14,6 +14,7 @@ export const messageBuffers = new Map();
 export const webhookTargets = new Map();
 export const activeStreams = new Map();
 export const activeStreamHistory = new Map();
+export const lastStreamByKey = new Map();
 export const streamMeta = new Map();
 export const responseUrls = new Map();
 export const streamContext = new AsyncLocalStorage();

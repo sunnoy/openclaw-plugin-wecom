@@ -1,7 +1,7 @@
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
 import { THINKING_PLACEHOLDER } from "./constants.js";
-import { activeStreamHistory, activeStreams, messageBuffers } from "./state.js";
+import { activeStreamHistory, activeStreams, lastStreamByKey, messageBuffers } from "./state.js";
 
 export function getMessageStreamKey(message) {
   if (!message || typeof message !== "object") {
@@ -25,6 +25,7 @@ export function registerActiveStream(streamKey, streamId) {
   deduped.push(streamId);
   activeStreamHistory.set(streamKey, deduped);
   activeStreams.set(streamKey, streamId);
+  lastStreamByKey.set(streamKey, streamId);
 }
 
 export function unregisterActiveStream(streamKey, streamId) {
@@ -72,7 +73,31 @@ export function resolveActiveStream(streamKey) {
   activeStreamHistory.set(streamKey, remaining);
   const latest = remaining[remaining.length - 1];
   activeStreams.set(streamKey, latest);
+  lastStreamByKey.set(streamKey, latest);
   return latest;
+}
+
+/**
+ * Resolve a usable stream id for a sender/group.
+ * Prefer active history; if that is temporarily empty, fall back to the latest
+ * known stream id for the same key (when it still exists).
+ */
+export function resolveRecoverableStream(streamKey) {
+  const activeId = resolveActiveStream(streamKey);
+  if (activeId) {
+    return activeId;
+  }
+  if (!streamKey) {
+    return null;
+  }
+  const recentId = lastStreamByKey.get(streamKey);
+  if (!recentId) {
+    return null;
+  }
+  if (!streamManager.hasStream(recentId)) {
+    return null;
+  }
+  return recentId;
 }
 
 export function clearBufferedMessagesForStream(streamKey, reason) {
