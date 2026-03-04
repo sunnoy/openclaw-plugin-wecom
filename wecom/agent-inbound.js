@@ -16,11 +16,15 @@ import {
   getDynamicAgentConfig,
   shouldUseDynamicAgent,
 } from "../dynamic-agent.js";
-import { agentSendText, agentDownloadMedia } from "./agent-api.js";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+import { agentSendText, agentUploadMedia, agentSendMedia, agentDownloadMedia } from "./agent-api.js";
 import { resolveAccount } from "./accounts.js";
 import { resolveWecomCommandAuthorized } from "./allow-from.js";
 import { checkCommandAllowlist, getCommandConfig, isWecomAdmin } from "./commands.js";
 import { MAX_REQUEST_BODY_SIZE } from "./constants.js";
+import { resolveAgentMediaTypeFromFilename } from "./channel-plugin.js";
+import { wecomFetch } from "./http.js";
 import { getRuntime, resolveAgentConfig } from "./state.js";
 import { ensureDynamicAgentListed } from "./workspace-template.js";
 import {
@@ -384,6 +388,66 @@ async function processAgentMessage({
     dispatcherOptions: {
       deliver: async (payload, info) => {
         const text = payload.text ?? "";
+
+        // ── Handle media (images / files) ──────────────────────
+        const mediaUrls = payload.mediaUrls || (payload.mediaUrl ? [payload.mediaUrl] : []);
+        for (const rawUrl of mediaUrls) {
+          try {
+            let absolutePath = rawUrl;
+            if (absolutePath.startsWith("sandbox:")) {
+              absolutePath = absolutePath.replace(/^sandbox:\/{0,2}/, "");
+              if (!absolutePath.startsWith("/")) absolutePath = "/" + absolutePath;
+            }
+
+            let buffer;
+            let filename;
+
+            if (absolutePath.startsWith("/")) {
+              buffer = await readFile(absolutePath);
+              filename = basename(absolutePath);
+            } else {
+              // Remote URL: download first
+              const dlRes = await wecomFetch(rawUrl);
+              if (!dlRes.ok) {
+                logger.error("[agent-inbound] media download failed", { url: rawUrl, status: dlRes.status });
+                continue;
+              }
+              buffer = Buffer.from(await dlRes.arrayBuffer());
+              try {
+                filename = basename(new URL(rawUrl).pathname) || "file";
+              } catch {
+                filename = "file";
+              }
+            }
+
+            const uploadType = resolveAgentMediaTypeFromFilename(filename);
+            const mediaId = await agentUploadMedia({
+              agent: agentConfig,
+              type: uploadType,
+              buffer,
+              filename,
+            });
+            await agentSendMedia({
+              agent: agentConfig,
+              toUser: fromUser,
+              mediaId,
+              mediaType: uploadType,
+            });
+            logger.info("[agent-inbound] media delivered", {
+              kind: info.kind,
+              to: fromUser,
+              filename,
+              uploadType,
+            });
+          } catch (err) {
+            logger.error("[agent-inbound] media delivery failed", {
+              url: rawUrl,
+              error: err.message,
+            });
+          }
+        }
+
+        // ── Handle text ────────────────────────────────────────
         if (!text.trim()) return;
 
         try {

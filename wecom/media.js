@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { WecomCrypto } from "../crypto.js";
 import { logger } from "../logger.js";
 import { MEDIA_CACHE_DIR } from "./constants.js";
+import { wecomFetch } from "./http.js";
 
 // ── Magic-byte signatures for common file formats ───────────────────────────
 const MAGIC_SIGNATURES = [
@@ -87,7 +88,7 @@ export async function downloadAndDecryptImage(imageUrl, encodingAesKey, token) {
   }
 
   logger.info("Downloading image", { url: imageUrl.substring(0, 80) });
-  const response = await fetch(imageUrl);
+  const response = await wecomFetch(imageUrl);
   if (!response.ok) {
     throw new Error(`Failed to download image: ${response.status}`);
   }
@@ -127,7 +128,7 @@ export async function downloadWecomFile(fileUrl, fileName, encodingAesKey, token
   }
 
   logger.info("Downloading file", { url: fileUrl.substring(0, 80), name: fileName });
-  const response = await fetch(fileUrl);
+  const response = await wecomFetch(fileUrl);
   if (!response.ok) {
     throw new Error(`Failed to download file: ${response.status}`);
   }

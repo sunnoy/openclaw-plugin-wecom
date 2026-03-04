@@ -9,12 +9,23 @@ REMOTE_PORT="${E2E_REMOTE_OPENCLAW_PORT:-18789}"
 LOCAL_PORT="${E2E_LOCAL_TUNNEL_PORT:-28789}"
 
 fetch_remote_wecom_config() {
-  ssh "$SSH_HOST" "node -e \"const fs=require('fs');const p=process.env.HOME+'/.openclaw/openclaw.json';const cfg=JSON.parse(fs.readFileSync(p,'utf8'));const w=cfg?.channels?.wecom||{};process.stdout.write(JSON.stringify({token:w.token||'',aes:w.encodingAesKey||'',path:w.webhookPath||'/webhooks/wecom'}));\""
+  ssh "$SSH_HOST" "node -e \"const fs=require('fs');const p=process.env.HOME+'/.openclaw/openclaw.json';const cfg=JSON.parse(fs.readFileSync(p,'utf8'));const w=cfg?.channels?.wecom||{};const a=w.agent||{};process.stdout.write(JSON.stringify({token:w.token||'',aes:w.encodingAesKey||'',path:w.webhookPath||'/webhooks/wecom',agentToken:a.token||'',agentAes:a.encodingAesKey||'',corpId:a.corpId||'',corpSecret:a.corpSecret||'',agentId:String(a.agentId||'')}));\""
 }
 
 apply_remote_env() {
   local remote_json="$1"
-  mapfile -t env_lines < <(node -e "const v=JSON.parse(process.argv[1]);if(!v.token||!v.aes){process.exit(9);}console.log('E2E_WECOM_TOKEN='+v.token);console.log('E2E_WECOM_ENCODING_AES_KEY='+v.aes);console.log('E2E_WECOM_WEBHOOK_PATH='+v.path);" "$remote_json")
+  mapfile -t env_lines < <(node -e "
+    const v=JSON.parse(process.argv[1]);
+    if(!v.token||!v.aes){process.exit(9);}
+    console.log('E2E_WECOM_TOKEN='+v.token);
+    console.log('E2E_WECOM_ENCODING_AES_KEY='+v.aes);
+    console.log('E2E_WECOM_WEBHOOK_PATH='+v.path);
+    if(v.agentToken) console.log('E2E_WECOM_AGENT_TOKEN='+v.agentToken);
+    if(v.agentAes) console.log('E2E_WECOM_AGENT_ENCODING_AES_KEY='+v.agentAes);
+    if(v.corpId) console.log('E2E_WECOM_AGENT_CORP_ID='+v.corpId);
+    if(v.corpSecret) console.log('E2E_WECOM_AGENT_CORP_SECRET='+v.corpSecret);
+    if(v.agentId) console.log('E2E_WECOM_AGENT_ID='+v.agentId);
+  " "$remote_json")
   for entry in "${env_lines[@]}"; do
     export "$entry"
   done

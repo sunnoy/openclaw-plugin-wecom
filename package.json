@@ -1,6 +1,6 @@
 {
     "name": "@sunnoy/wecom",
-    "version": "1.5.0",
+    "version": "1.5.1",
     "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
     "type": "module",
     "main": "index.js",
@@ -21,6 +21,9 @@
     ],
     "peerDependencies": {
         "openclaw": "*"
+    },
+    "optionalDependencies": {
+        "undici": "^7.0.0"
     },
     "scripts": {
         "test": "npm run test:unit",

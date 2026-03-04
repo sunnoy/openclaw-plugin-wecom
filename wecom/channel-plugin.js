@@ -11,7 +11,9 @@ import { messageBuffers, resolveAgentConfig, resolveWebhookUrl, responseUrls, st
 import { resolveRecoverableStream, unregisterActiveStream } from "./stream-utils.js";
 import { resolveWecomTarget } from "./target.js";
 import { webhookSendImage, webhookSendText, webhookUploadFile, webhookSendFile } from "./webhook-bot.js";
-import { registerWebhookTarget } from "./webhook-targets.js";
+import { normalizeWebhookPath, registerWebhookTarget } from "./webhook-targets.js";
+import { wecomFetch, setConfigProxyUrl } from "./http.js";
+import { createWecomRouteHandler } from "./http-handler.js";
 
 const AGENT_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
 
@@ -145,6 +147,17 @@ export const wecomChannelPlugin = {
               description: "Callback Encoding AES Key for Agent inbound (43 characters)",
               minLength: 43,
               maxLength: 43,
+            },
+          },
+        },
+        network: {
+          type: "object",
+          description: "Network configuration (proxy, timeouts)",
+          additionalProperties: false,
+          properties: {
+            egressProxyUrl: {
+              type: "string",
+              description: "HTTP(S) proxy URL for outbound WeCom API requests (e.g. http://proxy:8080). Env var WECOM_EGRESS_PROXY_URL takes precedence.",
             },
           },
         },
@@ -291,7 +304,7 @@ export const wecomChannelPlugin = {
       const saved = responseUrls.get(ctx?.streamKey ?? userId);
       if (saved && !saved.used && Date.now() < saved.expiresAt) {
         try {
-          const response = await fetch(saved.url, {
+          const response = await wecomFetch(saved.url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ msgtype: "text", text: { content: text } }),
@@ -535,7 +548,7 @@ export const wecomChannelPlugin = {
               buffer = await readFile(absolutePath);
               filename = basename(absolutePath);
             } else {
-              const res = await fetch(mediaUrl);
+              const res = await wecomFetch(mediaUrl);
               buffer = Buffer.from(await res.arrayBuffer());
               filename = basename(new URL(mediaUrl).pathname) || "image.png";
             }
@@ -611,7 +624,7 @@ export const wecomChannelPlugin = {
             });
           } else {
             // For external URLs, download first then upload.
-            const res = await fetch(mediaUrl);
+            const res = await wecomFetch(mediaUrl);
             if (!res.ok) {
               throw new Error(`download media failed: ${res.status}`);
             }
@@ -694,6 +707,10 @@ export const wecomChannelPlugin = {
         webhookPath: account.webhookPath,
       });
 
+      // Wire proxy URL from config (env var takes precedence inside http.js).
+      const wecomCfg = ctx.cfg?.channels?.wecom ?? {};
+      setConfigProxyUrl(wecomCfg.network?.egressProxyUrl ?? "");
+
       // Conflict detection: warn about duplicate tokens / agent IDs.
       const conflicts = detectAccountConflicts(ctx.cfg);
       for (const conflict of conflicts) {
@@ -709,13 +726,34 @@ export const wecomChannelPlugin = {
         config: ctx.cfg,
       });
 
+      // Register HTTP route with OpenClaw route framework.
+      // Uses registerPluginHttpRoute (new API in OpenClaw 2026.3.2+) for explicit
+      // path-based routing.  Falls back gracefully when the SDK is unavailable
+      // (older OpenClaw uses the legacy wildcard handler registered in index.js).
+      let unregisterBotRoute;
+      const botPath = account.webhookPath || "/webhooks/wecom";
+      try {
+        const { registerPluginHttpRoute } = await import("openclaw/plugin-sdk");
+        unregisterBotRoute = registerPluginHttpRoute({
+          path: botPath,
+          pluginId: "wecom",
+          accountId: account.accountId,
+          log: (msg) => logger.info(msg),
+          handler: createWecomRouteHandler(normalizeWebhookPath(botPath)),
+        });
+        logger.info("WeCom Bot HTTP route registered", { path: botPath });
+      } catch {
+        // openclaw/plugin-sdk not available — rely on legacy registerHttpHandler.
+        logger.debug("registerPluginHttpRoute unavailable, using legacy handler", { path: botPath });
+      }
+
       // Register Agent inbound webhook if agent inbound is fully configured.
       let unregisterAgent;
+      let unregisterAgentRoute;
       // Per-account agent path: /webhooks/app for default, /webhooks/app/{accountId} for others.
       const agentInboundPath = account.accountId === DEFAULT_ACCOUNT_ID
         ? "/webhooks/app"
         : `/webhooks/app/${account.accountId}`;
-      const botPath = account.webhookPath || "/webhooks/wecom";
       if (account.agentInboundConfigured) {
         if (botPath === agentInboundPath) {
           logger.error("WeCom: Agent inbound path conflicts with Bot webhook path, skipping Agent registration", {
@@ -740,6 +778,22 @@ export const wecomChannelPlugin = {
             config: ctx.cfg,
           });
           logger.info("WeCom Agent inbound webhook registered", { path: agentInboundPath });
+
+          // Register agent inbound HTTP route (new API).
+          try {
+            const { registerPluginHttpRoute } = await import("openclaw/plugin-sdk");
+            unregisterAgentRoute = registerPluginHttpRoute({
+              path: agentInboundPath,
+              pluginId: "wecom",
+              accountId: account.accountId,
+              source: "agent-inbound",
+              log: (msg) => logger.info(msg),
+              handler: createWecomRouteHandler(normalizeWebhookPath(agentInboundPath)),
+            });
+            logger.info("WeCom Agent inbound HTTP route registered", { path: agentInboundPath });
+          } catch {
+            logger.debug("registerPluginHttpRoute unavailable for agent inbound, using legacy handler");
+          }
         }
       }
 
@@ -751,7 +805,9 @@ export const wecomChannelPlugin = {
         }
         messageBuffers.clear();
         unregister();
+        if (unregisterBotRoute) unregisterBotRoute();
         if (unregisterAgent) unregisterAgent();
+        if (unregisterAgentRoute) unregisterAgentRoute();
       };
 
       // Backward compatibility: older runtime may not pass abortSignal.

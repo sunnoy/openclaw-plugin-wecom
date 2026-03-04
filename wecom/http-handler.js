@@ -14,6 +14,33 @@ import {
 } from "./stream-utils.js";
 import { normalizeWebhookPath } from "./webhook-targets.js";
 
+/**
+ * Create a per-route HTTP handler for the new `registerPluginHttpRoute` API.
+ *
+ * The route framework already matches by path, so this handler resolves
+ * targets at call time from the pre-registered in-memory map.
+ *
+ * @param {string} routePath - Normalized webhook path (e.g. "/webhooks/wecom")
+ * @returns {(req: IncomingMessage, res: ServerResponse) => Promise<void>}
+ */
+export function createWecomRouteHandler(routePath) {
+  return async (req, res) => {
+    const targets = webhookTargets.get(routePath);
+    if (!targets || targets.length === 0) {
+      res.writeHead(503, { "Content-Type": "text/plain" });
+      res.end("No webhook target configured");
+      return;
+    }
+    const url = new URL(req.url || "", "http://localhost");
+    const query = Object.fromEntries(url.searchParams);
+    await handleWecomRequest(req, res, targets, query, routePath);
+  };
+}
+
+/**
+ * Legacy wildcard HTTP handler for older OpenClaw versions that still support
+ * `api.registerHttpHandler()`.  Returns `false` when the path is not handled.
+ */
 export async function wecomHttpHandler(req, res) {
   const url = new URL(req.url || "", "http://localhost");
   const path = normalizeWebhookPath(url.pathname);
@@ -24,17 +51,27 @@ export async function wecomHttpHandler(req, res) {
   }
 
   const query = Object.fromEntries(url.searchParams);
+  await handleWecomRequest(req, res, targets, query, path);
+  return true;
+}
+
+/**
+ * Shared request handling logic used by both the legacy wildcard handler and
+ * the new per-route handler.
+ */
+async function handleWecomRequest(req, res, targets, query, path) {
   logger.debug("WeCom HTTP request", { method: req.method, path });
 
   // ── Agent inbound: route to dedicated handler when target has agentInbound config ──
   const agentTarget = targets.find((t) => t.account?.agentInbound);
   if (agentTarget) {
-    return handleAgentInbound({
+    await handleAgentInbound({
       req,
       res,
       agentAccount: agentTarget.account.agentInbound,
       config: agentTarget.config,
     });
+    return;
   }
 
   // ── Bot mode: JSON-based stream handling ──
@@ -45,7 +82,7 @@ export async function wecomHttpHandler(req, res) {
     if (!target) {
       res.writeHead(503, { "Content-Type": "text/plain" });
       res.end("No webhook target configured");
-      return true;
+      return;
     }
 
     const webhook = new WecomWebhook({
@@ -58,13 +95,13 @@ export async function wecomHttpHandler(req, res) {
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(echo);
       logger.info("WeCom URL verification successful");
-      return true;
+      return;
     }
 
     res.writeHead(403, { "Content-Type": "text/plain" });
     res.end("Verification failed");
     logger.warn("WeCom URL verification failed");
-    return true;
+    return;
   }
 
   // POST: Message handling
@@ -73,7 +110,7 @@ export async function wecomHttpHandler(req, res) {
     if (!target) {
       res.writeHead(503, { "Content-Type": "text/plain" });
       res.end("No webhook target configured");
-      return true;
+      return;
     }
 
     // Read request body
@@ -94,12 +131,12 @@ export async function wecomHttpHandler(req, res) {
       // Duplicate message — ACK 200 to prevent platform retry storm.
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("success");
-      return true;
+      return;
     }
     if (!result) {
       res.writeHead(400, { "Content-Type": "text/plain" });
       res.end("Bad Request");
-      return true;
+      return;
     }
 
     // Handle text message
@@ -156,7 +193,7 @@ export async function wecomHttpHandler(req, res) {
           logger.error("WeCom message processing failed", { error: err.message });
           await handleStreamError(streamId, streamKey, "处理消息时出错，请稍后再试。");
         });
-        return true;
+        return;
       }
 
       // Debounce: buffer non-command messages per user/group.
@@ -187,7 +224,7 @@ export async function wecomHttpHandler(req, res) {
         logger.info("WeCom: message buffered (first)", { streamKey, streamId });
       }
 
-      return true;
+      return;
     }
 
     // Handle stream refresh - return current stream state
@@ -210,7 +247,7 @@ export async function wecomHttpHandler(req, res) {
         );
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(streamResponse);
-        return true;
+        return;
       }
 
       // Check if stream should be closed (main response done + idle timeout).
@@ -257,7 +294,7 @@ export async function wecomHttpHandler(req, res) {
         }, 30 * 1000);
       }
 
-      return true;
+      return;
     }
 
     // Handle event
@@ -296,20 +333,19 @@ export async function wecomHttpHandler(req, res) {
         logger.info("Sending welcome message", { fromUser, streamId });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(streamResponse);
-        return true;
+        return;
       }
 
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end("success");
-      return true;
+      return;
     }
 
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("success");
-    return true;
+    return;
   }
 
   res.writeHead(405, { "Content-Type": "text/plain" });
   res.end("Method Not Allowed");
-  return true;
 }

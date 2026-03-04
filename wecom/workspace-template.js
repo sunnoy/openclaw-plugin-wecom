@@ -103,7 +103,7 @@ export function upsertAgentIdOnlyEntry(cfg, agentId) {
   }
 
   if (!existingIds.has(normalizedId)) {
-    nextList.push({ id: normalizedId });
+    nextList.push({ id: normalizedId, heartbeat: {} });
     changed = true;
   }
 

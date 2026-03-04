@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 import { logger } from "../logger.js";
 import { AGENT_API_REQUEST_TIMEOUT_MS } from "./constants.js";
+import { wecomFetch } from "./http.js";
 
 /**
  * Send a text message via Webhook Bot.
@@ -86,14 +87,13 @@ export async function webhookUploadFile({ url, buffer, filename }) {
   const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
   const multipartBody = Buffer.concat([header, buffer, footer]);
 
-  const res = await fetch(uploadUrl, {
+  const res = await wecomFetch(uploadUrl, {
     method: "POST",
     headers: {
       "Content-Type": `multipart/form-data; boundary=${boundary}`,
       "Content-Length": String(multipartBody.length),
     },
     body: multipartBody,
-    signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
   });
   const json = await res.json();
 
@@ -140,11 +140,10 @@ function extractKey(url) {
 async function postWebhook(url, body) {
   logger.debug("Webhook bot POST", { url: url.substring(0, 60), msgtype: body.msgtype });
 
-  const res = await fetch(url, {
+  const res = await wecomFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
   });
   const json = await res.json();
 

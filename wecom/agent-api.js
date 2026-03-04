@@ -10,6 +10,7 @@ import {
   AGENT_API_REQUEST_TIMEOUT_MS,
   TOKEN_REFRESH_BUFFER_MS,
 } from "./constants.js";
+import { wecomFetch } from "./http.js";
 
 /**
  * Token cache: Map<corpId:agentId, { token, expiresAt, refreshPromise }>
@@ -43,7 +44,7 @@ export async function getAccessToken(agent) {
   cache.refreshPromise = (async () => {
     try {
       const url = `${AGENT_API_ENDPOINTS.GET_TOKEN}?corpid=${encodeURIComponent(agent.corpId)}&corpsecret=${encodeURIComponent(agent.corpSecret)}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS) });
+      const res = await wecomFetch(url);
       const json = await res.json();
 
       if (!json?.access_token) {
@@ -94,11 +95,10 @@ export async function agentSendText(params) {
         text: { content: text },
       };
 
-  const res = await fetch(url, {
+  const res = await wecomFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
   });
   const json = await res.json();
 
@@ -156,14 +156,13 @@ export async function agentUploadMedia(params) {
   const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
   const body = Buffer.concat([header, buffer, footer]);
 
-  const res = await fetch(url, {
+  const res = await wecomFetch(url, {
     method: "POST",
     headers: {
       "Content-Type": `multipart/form-data; boundary=${boundary}`,
       "Content-Length": String(body.length),
     },
     body,
-    signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
   });
   const json = await res.json();
 
@@ -206,11 +205,10 @@ export async function agentSendMedia(params) {
         [mediaType]: mediaPayload,
       };
 
-  const res = await fetch(url, {
+  const res = await wecomFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS),
   });
   const json = await res.json();
 
@@ -232,7 +230,7 @@ export async function agentDownloadMedia(params) {
   const token = await getAccessToken(agent);
   const url = `${AGENT_API_ENDPOINTS.DOWNLOAD_MEDIA}?access_token=${encodeURIComponent(token)}&media_id=${encodeURIComponent(mediaId)}`;
 
-  const res = await fetch(url, { signal: AbortSignal.timeout(AGENT_API_REQUEST_TIMEOUT_MS) });
+  const res = await wecomFetch(url);
 
   if (!res.ok) {
     throw new Error(`agent download media failed: ${res.status}`);

@@ -8,6 +8,7 @@ import { resolveAgentConfig, responseUrls, streamContext } from "./state.js";
 import { resolveActiveStream } from "./stream-utils.js";
 import { resolveAgentWorkspaceDirLocal } from "./workspace-template.js";
 import { THINKING_PLACEHOLDER } from "./constants.js";
+import { wecomFetch } from "./http.js";
 
 // WeCom upload API rejects files smaller than 5 bytes (error 40006).
 const WECOM_MIN_FILE_SIZE = 5;
@@ -196,7 +197,7 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
             if (isLocal) {
               fileBuf = await readFile(absPath);
             } else {
-              const res = await fetch(mediaPath, { signal: AbortSignal.timeout(30_000) });
+              const res = await wecomFetch(mediaPath);
               if (!res.ok) throw new Error(`download failed: ${res.status}`);
               fileBuf = Buffer.from(await res.arrayBuffer());
             }
@@ -420,7 +421,7 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
     const saved = responseUrls.get(senderId);
     if (saved && !saved.used && Date.now() < saved.expiresAt) {
       try {
-        const response = await fetch(saved.url, {
+        const response = await wecomFetch(saved.url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ msgtype: "text", text: { content: processedText } }),
