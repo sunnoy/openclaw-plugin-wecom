@@ -26,6 +26,12 @@ export function registerActiveStream(streamKey, streamId) {
   activeStreamHistory.set(streamKey, deduped);
   activeStreams.set(streamKey, streamId);
   lastStreamByKey.set(streamKey, streamId);
+  logger.info("registerActiveStream", {
+    streamKey,
+    streamId,
+    historySize: deduped.length,
+    history: deduped,
+  });
 }
 
 export function unregisterActiveStream(streamKey, streamId) {
@@ -38,6 +44,7 @@ export function unregisterActiveStream(streamKey, streamId) {
     if (activeStreams.get(streamKey) === streamId) {
       activeStreams.delete(streamKey);
     }
+    logger.info("unregisterActiveStream (empty history)", { streamKey, streamId });
     return;
   }
 
@@ -45,11 +52,18 @@ export function unregisterActiveStream(streamKey, streamId) {
   if (remaining.length === 0) {
     activeStreamHistory.delete(streamKey);
     activeStreams.delete(streamKey);
+    logger.info("unregisterActiveStream (last stream)", { streamKey, streamId });
     return;
   }
 
   activeStreamHistory.set(streamKey, remaining);
   activeStreams.set(streamKey, remaining[remaining.length - 1]);
+  logger.info("unregisterActiveStream", {
+    streamKey,
+    streamId,
+    remainingSize: remaining.length,
+    remaining,
+  });
 }
 
 export function resolveActiveStream(streamKey) {

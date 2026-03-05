@@ -282,12 +282,20 @@ export const wecomChannelPlugin = {
       // `to` format: "wecom:userid" or "userid".
       const userId = to.replace(/^wecom:/, "");
 
-      // Prefer stream from async context (correct for concurrent processing).
+      // Prefer async-context stream only when it is still writable.
+      // If the context stream already finished (common with concurrent messages),
+      // fall back to the latest recoverable active stream for this user/group.
       const ctx = streamContext.getStore();
-      const streamId = ctx?.streamId ?? resolveRecoverableStream(userId);
+      const ctxStreamId = ctx?.streamId ?? null;
+      const ctxStream = ctxStreamId ? streamManager.getStream(ctxStreamId) : null;
+      const canUseCtxStream = !!(ctxStreamId && ctxStream && !ctxStream.finished);
+      const streamId = canUseCtxStream ? ctxStreamId : resolveRecoverableStream(userId);
+      const streamObj = streamId ? streamManager.getStream(streamId) : null;
+      const hasStream = streamId ? streamManager.hasStream(streamId) : false;
+      const finished = streamObj?.finished ?? true;
 
       // Layer 1: Active stream (normal path)
-      if (streamId && streamManager.hasStream(streamId) && !streamManager.getStream(streamId)?.finished) {
+      if (streamId && hasStream && !finished) {
         logger.debug("Appending outbound text to stream", {
           userId,
           streamId,
@@ -303,6 +311,19 @@ export const wecomChannelPlugin = {
         };
       }
 
+      // Log stream miss details for debugging concurrent-message issues.
+      logger.warn("WeCom sendText: Layer 1 stream miss", {
+        userId,
+        streamId: streamId ?? null,
+        hasStream,
+        finished,
+        hasAsyncContext: !!ctx,
+        ctxStreamId,
+        canUseCtxStream,
+        ctxStreamKey: ctx?.streamKey ?? null,
+        textPreview: text.substring(0, 50),
+      });
+
       // Layer 2: Fallback via response_url
       // response_url is valid for 1 hour and can be used only once.
       // responseUrls is keyed by streamKey (fromUser for DM, chatId for group).
@@ -312,7 +333,7 @@ export const wecomChannelPlugin = {
           const response = await wecomFetch(saved.url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ msgtype: "text", text: { content: text } }),
+            body: JSON.stringify({ msgtype: "markdown", markdown: { content: text } }),
           });
           const responseBody = await response.text().catch(() => "");
           const result = parseResponseUrlResult(response, responseBody);
@@ -400,11 +421,14 @@ export const wecomChannelPlugin = {
     sendMedia: async ({ cfg: _cfg, to, text, mediaUrl, accountId: _accountId }) => {
       const userId = to.replace(/^wecom:/, "");
 
-      // Prefer stream from async context (correct for concurrent processing).
+      // Prefer async-context stream only when it is still writable.
       const ctx = streamContext.getStore();
-      const streamId = ctx?.streamId ?? resolveRecoverableStream(userId);
+      const ctxStreamId = ctx?.streamId ?? null;
+      const ctxStream = ctxStreamId ? streamManager.getStream(ctxStreamId) : null;
+      const canUseCtxStream = !!(ctxStreamId && ctxStream && !ctxStream.finished);
+      const streamId = canUseCtxStream ? ctxStreamId : resolveRecoverableStream(userId);
 
-      if (streamId && streamManager.hasStream(streamId)) {
+      if (streamId && streamManager.hasStream(streamId) && !streamManager.getStream(streamId)?.finished) {
         // Check if mediaUrl is a local path (sandbox: prefix or absolute path)
         const isLocalPath = mediaUrl.startsWith("sandbox:") || mediaUrl.startsWith("/");
 

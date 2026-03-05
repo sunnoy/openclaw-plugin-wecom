@@ -43,6 +43,7 @@ import {
 
 const RECENT_MSGID_TTL_MS = 10 * 60 * 1000;
 const recentAgentMsgIds = new Map();
+const AGENT_INBOUND_ALLOWED_MSG_TYPES = new Set(["text", "image", "voice", "video", "file"]);
 
 function rememberAgentMsgId(msgId) {
   const now = Date.now();
@@ -156,6 +157,21 @@ async function handleMessageCallback(req, res, crypto, agentConfig, config, acco
     const chatId = extractChatId(msg);
     const msgId = extractMsgId(msg);
     const content = extractContent(msg);
+
+    // White-list inbound message types to prevent event callbacks
+    // (for example subscribe/unsubscribe) from triggering LLM replies.
+    if (!AGENT_INBOUND_ALLOWED_MSG_TYPES.has(msgType)) {
+      logger.info("[agent-inbound] unsupported msgType ignored", {
+        msgType,
+        fromUser,
+        chatId: chatId || "N/A",
+        msgId: msgId || "N/A",
+        contentPreview: content.substring(0, 100),
+      });
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("success");
+      return true;
+    }
 
     // Deduplication
     if (msgId) {

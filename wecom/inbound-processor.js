@@ -443,7 +443,7 @@ export async function processInboundMessage({
           }
           unregisterActiveStream(streamKey, streamId);
         }
-      }, 3000); // 3s grace after last delivery
+      }, 200); // short grace for I/O flush; dispatcher is already done
     };
 
     // Dispatch reply with AI processing.

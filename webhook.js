@@ -435,7 +435,12 @@ export class WecomWebhook {
       content: content,
     };
 
-    // Optional mixed media list (images are valid on finished responses).
+    // Thinking content for model reasoning display (collapsible in WeCom client).
+    if (options.thinkingContent) {
+      stream.thinking_content = options.thinkingContent;
+    }
+
+    // Optional mixed media list (images are valid only on finished responses).
     if (options.msgItem && options.msgItem.length > 0) {
       stream.msg_item = options.msgItem;
     }

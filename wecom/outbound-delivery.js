@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
@@ -109,8 +109,8 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
   });
 
   // Handle absolute-path MEDIA lines manually; OpenClaw rejects these paths upstream.
-  // Match both line-start (^MEDIA:) and inline (…MEDIA:) patterns.
-  const mediaRegex = /(?:^|(?<=\s))MEDIA:\s*(.+?)$/gm;
+  // Match only line-start MEDIA directives to align with upstream OpenClaw.
+  const mediaRegex = /^MEDIA:\s*(.+?)$/gm;
   const mediaMatches = [];
   let match;
   while ((match = mediaRegex.exec(text)) !== null) {
@@ -312,114 +312,6 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
     }
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // Auto-detect /workspace/… file paths in LLM reply text.
-  // The sandbox container mounts /workspace → host ~/.openclaw/workspace-{agentId}.
-  // When the LLM mentions a file path like "/workspace/report.pdf", we resolve
-  // the host-side path, verify the file exists, and send it via Agent DM.
-  // ──────────────────────────────────────────────────────────────────────────
-  if (effectiveAgentId && processedText) {
-    // Match /workspace/ paths (non-greedy: stop at whitespace, quotes, backticks,
-    // angle brackets, parentheses, or end of string).
-    const workspacePathRegex = /\/workspace\/[^\s"'`<>()]+/g;
-    const detectedPaths = [];
-    let wpMatch;
-    while ((wpMatch = workspacePathRegex.exec(processedText)) !== null) {
-      const rawPath = wpMatch[0]
-        // Strip trailing punctuation that is likely not part of the filename.
-        .replace(/[.,;:!?。，；：！？）》」』\]]+$/, "");
-      if (rawPath.length > "/workspace/".length) {
-        detectedPaths.push(rawPath);
-      }
-    }
-
-    if (detectedPaths.length > 0) {
-      const workspaceDir = resolveAgentWorkspaceDirLocal(effectiveAgentId);
-      const agentCfgAuto = resolveAgentConfig();
-      const imageExtsAuto = new Set(["jpg", "jpeg", "png", "gif", "bmp", "webp"]);
-
-      for (const wsPath of detectedPaths) {
-        // /workspace/foo.pdf → hostDir/foo.pdf (with traversal guard)
-        const hostPath = resolveWorkspaceHostPathSafe({
-          workspaceDir,
-          workspacePath: wsPath,
-        });
-        if (!hostPath) {
-          processedText = processedText.replace(wsPath, "⚠️ 检测到不安全的 /workspace/ 路径，已拒绝发送");
-          logger.warn("Auto-detect: rejected unsafe /workspace/ path", {
-            streamId,
-            wsPath,
-            workspaceDir,
-          });
-          continue;
-        }
-        const filename = basename(hostPath);
-        const ext = filename.split(".").pop()?.toLowerCase() || "";
-
-        // Skip image files — they are handled by the stream msg_item mechanism.
-        if (imageExtsAuto.has(ext)) continue;
-
-        // Check the path exists on host and is a regular file.
-        try {
-          const st = await stat(hostPath);
-          if (!st.isFile()) {
-            logger.debug("Auto-detect: path is not a regular file, skipping", {
-              wsPath,
-              hostPath,
-            });
-            continue;
-          }
-        } catch {
-          logger.debug("Auto-detect: workspace file not found on host, skipping", {
-            wsPath,
-            hostPath,
-          });
-          continue;
-        }
-
-        // File exists on host — send via Agent DM.
-        if (agentCfgAuto && senderId) {
-          try {
-            const hint = await uploadAndSendFile({
-              hostPath,
-              filename,
-              agent: agentCfgAuto,
-              senderId,
-              streamId,
-            });
-            // Replace the path mention in text with a delivery hint.
-            // Also strip any preceding "MEDIA:" prefix if the LLM wrote "MEDIA:/workspace/…".
-            const escapedPath = wsPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            const withMediaPrefix = new RegExp(`MEDIA:\\s*${escapedPath}`, "g");
-            if (withMediaPrefix.test(processedText)) {
-              processedText = processedText.replace(withMediaPrefix, hint);
-            } else {
-              processedText = processedText.replace(wsPath, hint);
-            }
-            logger.info("Auto-detect: sent workspace file via Agent DM", {
-              streamId,
-              wsPath,
-              hostPath,
-              filename,
-              senderId,
-            });
-          } catch (autoErr) {
-            processedText = processedText.replace(
-              wsPath,
-              `⚠️ 文件「${filename}」发送失败：${autoErr.message}`,
-            );
-            logger.error("Auto-detect: failed to send workspace file via Agent DM", {
-              streamId,
-              wsPath,
-              hostPath,
-              error: autoErr.message,
-            });
-          }
-        }
-      }
-    }
-  }
-
   // All outbound content is sent via stream updates.
   if (!processedText.trim()) {
     logger.debug("WeCom: empty block after processing, skipping stream update");
@@ -482,7 +374,7 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
         const response = await wecomFetch(saved.url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ msgtype: "text", text: { content: processedText } }),
+          body: JSON.stringify({ msgtype: "markdown", markdown: { content: processedText } }),
         });
         const responseBody = await response.text().catch(() => "");
         const result = parseResponseUrlResult(response, responseBody);

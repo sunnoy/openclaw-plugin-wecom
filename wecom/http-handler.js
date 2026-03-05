@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
+import { parseThinkingContent } from "../think-parser.js";
 import { WecomWebhook } from "../webhook.js";
 import { handleAgentInbound } from "./agent-inbound.js";
 import { extractLeadingSlashCommand, isHighPriorityCommand } from "./commands.js";
@@ -151,9 +152,16 @@ async function handleWecomRequest(req, res, targets, query, path) {
       streamManager.createStream(streamId);
       streamManager.appendStream(streamId, THINKING_PLACEHOLDER);
 
-      // Passive reply: return stream id immediately in the sync response.
-      // Include the placeholder so the client displays it right away.
-      const streamResponse = webhook.buildStreamResponse(streamId, THINKING_PLACEHOLDER, false, timestamp, nonce);
+      // Passive reply: return stream id with thinking_content so the WeCom
+      // client shows the collapsible "thinking" UI while the LLM processes.
+      const streamResponse = webhook.buildStreamResponse(
+        streamId,
+        "",
+        false,
+        timestamp,
+        nonce,
+        { thinkingContent: THINKING_PLACEHOLDER },
+      );
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(streamResponse);
@@ -266,15 +274,31 @@ async function handleWecomRequest(req, res, targets, query, path) {
         }
       }
 
+      // Parse thinking tags from accumulated content so WeCom can display
+      // the model's reasoning in a collapsible section.
+      const { visibleContent, thinkingContent, isThinking } =
+        parseThinkingContent(stream.content);
+
+      // While the model is still thinking (unclosed <think> tag) and there is
+      // no visible content yet, keep showing the placeholder in thinking_content.
+      const effectiveThinking =
+        thinkingContent || (isThinking ? THINKING_PLACEHOLDER : "");
+
       // Return current stream payload.
       const streamResponse = webhook.buildStreamResponse(
         streamId,
-        stream.content,
+        visibleContent,
         stream.finished,
         timestamp,
         nonce,
-        // Pass msgItem when stream is finished and has images
-        stream.finished && stream.msgItem.length > 0 ? { msgItem: stream.msgItem } : {},
+        {
+          // Pass msgItem only when stream is finished and has images.
+          ...(stream.finished && stream.msgItem.length > 0
+            ? { msgItem: stream.msgItem }
+            : {}),
+          // Include thinking content when available.
+          ...(effectiveThinking ? { thinkingContent: effectiveThinking } : {}),
+        },
       );
 
       res.writeHead(200, { "Content-Type": "application/json" });
