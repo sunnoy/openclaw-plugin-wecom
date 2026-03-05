@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.1 (2026-03-05)
+
+### Fixes
+
+- **Fix message truncation during tool calls (#73)**: Move `mainResponseDone` flag from deliver callback to after `dispatchDone`, preventing the 30s idle timeout from closing the stream while LLM is still executing tools
+
 ## 1.7.0 (2026-03-05)
 
 ### Features

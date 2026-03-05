@@ -482,14 +482,6 @@ export async function processInboundMessage({
               });
             }
 
-            // Mark stream meta when main response is done.
-            if (streamId && (info.kind === "final" || info.kind === "block")) {
-              streamMeta.set(streamId, {
-                mainResponseDone: true,
-                doneAt: Date.now(),
-              });
-            }
-
             // Schedule / reset stream close timer if dispatch already returned.
             if (streamId && dispatchDone) {
               scheduleStreamClose();
@@ -503,10 +495,17 @@ export async function processInboundMessage({
       });
     });
 
-    // Dispatch returned.
+    // Dispatch returned — the entire LLM turn (all blocks, tool calls,
+    // and final payloads) is complete.  Mark mainResponseDone now so the
+    // idle-close timer in http-handler only starts after there is truly
+    // no more content to deliver.
     dispatchDone = true;
 
     if (streamId) {
+      streamMeta.set(streamId, {
+        mainResponseDone: true,
+        doneAt: Date.now(),
+      });
       const stream = streamManager.getStream(streamId);
       if (!stream || stream.finished) {
         unregisterActiveStream(streamKey, streamId);
