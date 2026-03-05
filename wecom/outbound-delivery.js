@@ -1,5 +1,5 @@
-import { readFile, access, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { logger } from "../logger.js";
 import { streamManager } from "../stream-manager.js";
 import { agentSendText, agentUploadMedia, agentSendMedia } from "./agent-api.js";
@@ -19,10 +19,36 @@ const WECOM_MIN_FILE_SIZE = 5;
  * ~/.openclaw/workspace-{agentId} on the host.  Any path starting with
  * /workspace/ is transparently rewritten when an agentId is available.
  */
+export function resolveWorkspaceHostPathSafe({ workspaceDir, workspacePath }) {
+  const relativePath = String(workspacePath || "").replace(/^\/workspace\/?/, "");
+  if (!relativePath) {
+    return null;
+  }
+
+  const hostPath = resolve(workspaceDir, relativePath);
+  const rel = relative(workspaceDir, hostPath);
+  const escapesWorkspace = rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+  if (escapesWorkspace) {
+    return null;
+  }
+  return hostPath;
+}
+
 function resolveHostPath(filePath, effectiveAgentId) {
   if (effectiveAgentId && filePath.startsWith("/workspace/")) {
-    const relative = filePath.slice("/workspace/".length);
-    const hostPath = join(resolveAgentWorkspaceDirLocal(effectiveAgentId), relative);
+    const workspaceDir = resolveAgentWorkspaceDirLocal(effectiveAgentId);
+    const hostPath = resolveWorkspaceHostPathSafe({
+      workspaceDir,
+      workspacePath: filePath,
+    });
+    if (!hostPath) {
+      logger.warn("Rejected unsafe /workspace/ path outside workspace", {
+        sandbox: filePath,
+        workspaceDir,
+        agentId: effectiveAgentId,
+      });
+      return null;
+    }
     logger.debug("Resolved sandbox path to host path", { sandbox: filePath, host: hostPath });
     return hostPath;
   }
@@ -110,6 +136,12 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
     for (const media of mediaMatches) {
       // Resolve /workspace/ sandbox paths to host-side paths.
       const resolvedMediaPath = resolveHostPath(media.path, effectiveAgentId);
+      if (!resolvedMediaPath) {
+        processedText = processedText
+          .replace(media.fullMatch, "⚠️ 检测到不安全的 /workspace/ 路径，已拒绝发送")
+          .trim();
+        continue;
+      }
       const mediaExt = resolvedMediaPath.split(".").pop()?.toLowerCase() || "";
       if (mediaImageExts.has(mediaExt)) {
         // Image: queue for delivery when stream finishes.
@@ -177,6 +209,15 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
       }
       // Resolve /workspace/ sandbox paths to host-side paths.
       absPath = resolveHostPath(absPath, effectiveAgentId);
+      if (!absPath) {
+        const unsafeHint = "⚠️ 检测到不安全的 /workspace/ 路径，已拒绝发送";
+        if (streamId && streamManager.hasStream(streamId)) {
+          streamManager.appendStream(streamId, `\n\n${unsafeHint}`);
+        } else {
+          processedText = processedText ? `${processedText}\n\n${unsafeHint}` : unsafeHint;
+        }
+        continue;
+      }
 
       const isLocal = absPath.startsWith("/");
       const mediaFilename = isLocal ? basename(absPath) : (basename(new URL(mediaPath).pathname) || "file");
@@ -298,19 +339,36 @@ export async function deliverWecomReply({ payload, senderId, streamId, agentId }
       const imageExtsAuto = new Set(["jpg", "jpeg", "png", "gif", "bmp", "webp"]);
 
       for (const wsPath of detectedPaths) {
-        // /workspace/foo.pdf → hostDir/foo.pdf
-        const relativePath = wsPath.replace(/^\/workspace\/?/, "");
-        if (!relativePath) continue;
-        const hostPath = join(workspaceDir, relativePath);
+        // /workspace/foo.pdf → hostDir/foo.pdf (with traversal guard)
+        const hostPath = resolveWorkspaceHostPathSafe({
+          workspaceDir,
+          workspacePath: wsPath,
+        });
+        if (!hostPath) {
+          processedText = processedText.replace(wsPath, "⚠️ 检测到不安全的 /workspace/ 路径，已拒绝发送");
+          logger.warn("Auto-detect: rejected unsafe /workspace/ path", {
+            streamId,
+            wsPath,
+            workspaceDir,
+          });
+          continue;
+        }
         const filename = basename(hostPath);
         const ext = filename.split(".").pop()?.toLowerCase() || "";
 
         // Skip image files — they are handled by the stream msg_item mechanism.
         if (imageExtsAuto.has(ext)) continue;
 
-        // Check file existence on host.
+        // Check the path exists on host and is a regular file.
         try {
-          await access(hostPath);
+          const st = await stat(hostPath);
+          if (!st.isFile()) {
+            logger.debug("Auto-detect: path is not a regular file, skipping", {
+              wsPath,
+              hostPath,
+            });
+            continue;
+          }
         } catch {
           logger.debug("Auto-detect: workspace file not found on host, skipping", {
             wsPath,
