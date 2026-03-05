@@ -20,6 +20,7 @@
 - [方式三：配置群机器人 (Webhook 模式)](#方式三配置群机器人-webhook-模式)
 
 ### 能力与路由
+- [三种模式消息能力对比](#三种模式消息能力对比)
 - [支持的消息类型](#支持的消息类型)
 - [流式回复能力](#流式回复能力)
 - [管理员用户](#管理员用户)
@@ -321,6 +322,131 @@ Webhook Bot 用于向群聊发送通知消息。
 - Webhook Bot 仅支持发送消息，不支持接收消息
 - 每个群聊可添加多个机器人
 - Webhook 地址请妥善保管，避免泄露
+
+## 三种模式消息能力对比
+
+企业微信提供了三种不同的接入方式，每种方式在私聊和群聊场景下的消息收发能力不同：
+
+### 能力矩阵
+
+| 能力 | Bot 模式 (AI 机器人) | Agent 模式 (自建应用) | Webhook 模式 (群机器人) |
+|------|---------------------|---------------------|----------------------|
+| **私聊接收** | ✅ JSON 回调 | ✅ XML 回调 | ❌ 不支持 |
+| **私聊被动回复** | ✅ 流式 stream | ✅ 同步回复 | ❌ 不支持 |
+| **私聊主动发送** | ❌ 不支持 | ✅ 应用消息 API | ❌ 不支持 |
+| **群聊接收** | ✅ @提及 JSON 回调 | ✅ @提及 XML 回调 | ❌ 不支持 |
+| **群聊被动回复** | ✅ 流式 stream | ✅ 同步回复 | ❌ 不支持 |
+| **群聊主动发送** | ❌ 不支持 | ✅ 应用消息 API | ✅ Webhook URL |
+| **流式回复** | ✅ 打字机效果 | ❌ 仅完整消息 | ❌ 仅完整消息 |
+| **思考过程展示** | ✅ thinking_content | ❌ | ❌ |
+| **媒体发送** | ✅ msg_item (图片) | ✅ API 上传 (图片/文件) | ✅ base64/upload |
+| **Markdown** | ✅ stream content | ✅ Markdown 消息类型 | ✅ Markdown 消息类型 |
+
+### 各模式详细说明
+
+#### Bot 模式 (AI 机器人)
+
+> 📖 [企业微信 AI 机器人开发指南](https://developer.work.weixin.qq.com/document/path/101039)
+
+**消息接收机制**：企业微信将用户消息以 **JSON 格式**通过 HTTP POST 回调到配置的 URL。支持私聊消息和群聊中 @提及机器人的消息。
+
+**消息回复机制**：采用**流式分片（streaming）**回复。收到回调后立即返回 `stream_id`，后续通过 `stream_refresh` 轮询接口推送增量内容。客户端展示打字机效果。
+
+- **被动回复**：用户发消息 → 回调触发 → 流式回复（支持文本、Markdown、图片、思考过程）
+- **主动发送**：❌ 不支持。AI 机器人没有主动发送 API，只能在收到消息后回复
+- **适用场景**：实时对话、问答，流式体验好
+
+#### Agent 模式 (自建应用)
+
+> 📖 [企业微信自建应用开发指南](https://developer.work.weixin.qq.com/document/path/90226)
+> 📖 [应用消息发送 API](https://developer.work.weixin.qq.com/document/path/90236)
+
+**消息接收机制**：企业微信将用户消息以 **XML 格式**通过 HTTP POST 回调到配置的 URL。支持私聊和群聊消息，以及图片、语音、文件等多种消息类型。
+
+**消息回复机制**：
+- **被动回复**：在回调响应中直接返回 XML 格式回复（需在 5 秒内响应）
+- **主动发送**：通过[应用消息 API](https://developer.work.weixin.qq.com/document/path/90236) 可主动向用户发送文本、图片、文件、Markdown 等消息。支持指定 `touser`（用户）、`toparty`（部门）、`totag`（标签）
+
+- **适用场景**：需要主动推送的场景（异步任务完成通知、定时报告），需要收发文件的场景
+
+#### Webhook 模式 (群机器人)
+
+> 📖 [企业微信群机器人配置说明](https://developer.work.weixin.qq.com/document/path/99110)
+
+**消息发送机制**：通过 HTTP POST 请求向 Webhook URL 发送消息。支持文本、Markdown、图片（base64）、文件（需先上传获取 media_id）。
+
+- **接收消息**：❌ 不支持。Webhook 仅为单向发送通道
+- **主动发送**：✅ 向 Webhook URL POST 即可发送到群聊
+- **适用场景**：单向通知（告警、日报）、定时推送
+
+### Webhook 消息发送方式
+
+Webhook 配置好后（见[方式三](#方式三配置群机器人-webhook-模式)），有以下方式发送消息：
+
+#### CLI 直接发送
+
+```bash
+openclaw message send --channel wecom --to "webhook:ops-group" "服务已恢复正常"
+```
+
+#### Agent 处理后投递到群
+
+让 agent 处理消息后将回复发到 webhook 群：
+
+```bash
+openclaw agent --agent myagent \
+  --message "帮我总结今天的监控告警" \
+  --deliver \
+  --reply-channel wecom \
+  --reply-to "webhook:ops-group"
+```
+
+#### Heartbeat 定时推送（推荐）
+
+在 agent 配置中添加 heartbeat，自动定时触发并将回复发到 webhook 群：
+
+```json
+{
+  "id": "report-agent",
+  "heartbeat": {
+    "every": "1h",
+    "target": "webhook:ops-group",
+    "prompt": "请总结最新的系统监控状态",
+    "activeHours": {
+      "start": "09:00",
+      "end": "18:00",
+      "timezone": "Asia/Shanghai"
+    }
+  }
+}
+```
+
+- `every` — 触发间隔（如 `30m`, `1h`, `6h`）
+- `target` — 回复目标，`webhook:` 前缀加配置中的 webhook 名称
+- `prompt` — 每次触发时给 agent 的提示语
+- `activeHours` — 可选，限制只在工作时间段内触发
+
+#### 系统 Crontab 定时发送
+
+```bash
+# crontab -e
+# 每天早上9点发送日报
+0 9 * * * openclaw agent --agent report-agent --message "生成今日晨报" --deliver --reply-channel wecom --reply-to "webhook:ops-group"
+
+# 每小时发送监控摘要
+0 * * * * openclaw message send --channel wecom --to "webhook:monitor-group" "$(curl -s http://localhost:9090/api/v1/alerts | jq -r '.data.alerts | length') 条活跃告警"
+```
+
+### 模式选择建议
+
+| 需求 | 推荐模式 |
+|------|---------|
+| 实时对话，流式打字机体验 | **Bot 模式** |
+| 双向对话 + 主动推送 + 文件处理 | **Agent 模式** |
+| 仅需向群聊推送通知 | **Webhook 模式** |
+| 同时需要对话和群通知 | **Bot/Agent 模式 + Webhook 模式** 组合使用 |
+
+> 💡 **三种模式可以同时启用**。例如：Bot 模式处理日常对话，Webhook 模式负责定时推送通知到群。配置时在同一个 `channels.wecom` 下同时填写 `token`/`encodingAesKey`（Bot）、`agent`（Agent）和 `webhooks`（Webhook）即可。
 
 ## 支持的消息类型
 
