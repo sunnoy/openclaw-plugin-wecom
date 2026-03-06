@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.9.0 (2026-03-06)
+
+### Features
+
+- **Bindings 路由**: 支持通过 OpenClaw `bindings` 配置将不同 WeCom 账户绑定到不同 Agent，显式 binding 优先于动态 Agent 路由 (#85)
+- **deliveryMode: "direct"**: 对齐上游标准，声明直接投递模式
+- **emptyPluginConfigSchema()**: plugin-level configSchema 改用上游推荐的 safeParse 格式
+
+### Fixes
+
+- **Agent API 长文本截断**: 新增 `splitTextByByteLimit()` 按 WeCom 2048 字节限制自动分段，优先在换行处断开 (#84)
+- **XML body 误发检测**: Bot webhook 收到 XML 请求时返回 400 并提示使用 Agent 回调地址 (#83)
+- **消除顶层副作用**: `setInterval` 从模块顶层移入 `register()` 函数
+
+### Chore
+
+- 删除 e2e 测试资源（远程测试通过后清理）
+- 更新 README：新增 Bindings 路由文档，更新项目结构
+
 ## 1.7.1 (2026-03-05)
 
 ### Fixes

@@ -128,6 +128,20 @@ async function handleWecomRequest(req, res, targets, query, path) {
     const body = Buffer.concat(chunks).toString("utf-8");
     logger.debug("WeCom message received", { bodyLength: body.length });
 
+    if (body.trimStart().startsWith("<")) {
+      logger.warn("WeCom: XML body received on Bot webhook (expected JSON). Agent callbacks should use /webhooks/app endpoint.", {
+        path,
+        bodyPreview: body.substring(0, 120),
+      });
+      res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(
+        "Invalid format: Bot webhook expects JSON.\n" +
+        "If you are configuring a WeCom self-built application (自建应用), " +
+        "use the Agent callback URL: /webhooks/app/{accountId}",
+      );
+      return;
+    }
+
     const webhook = new WecomWebhook({
       token: target.account.token,
       encodingAesKey: target.account.encodingAesKey,

@@ -27,6 +27,7 @@ import { resolveAgentMediaTypeFromFilename } from "./channel-plugin.js";
 import { wecomFetch } from "./http.js";
 import { getRuntime, resolveAgentConfig } from "./state.js";
 import { ensureDynamicAgentListed } from "./workspace-template.js";
+import { splitTextByByteLimit } from "../utils.js";
 import {
   extractEncryptFromXml,
   parseXml,
@@ -332,9 +333,19 @@ async function processAgentMessage({
     peer: { kind: peerKind, id: peerId },
   });
 
-  if (targetAgentId) {
+  const hasExplicitBinding = Array.isArray(config?.bindings) &&
+    config.bindings.some((b) =>
+      b.match?.channel === "wecom" && b.match?.accountId === accountId,
+    );
+
+  if (targetAgentId && !hasExplicitBinding) {
     route.agentId = targetAgentId;
     route.sessionKey = `agent:${targetAgentId}:${peerKind}:${peerId}`;
+  } else if (hasExplicitBinding) {
+    logger.debug("[agent-inbound] explicit binding found, skipping dynamic agent override", {
+      accountId,
+      resolvedAgentId: route.agentId,
+    });
   }
 
   // ── Build inbound context ─────────────────────────────────────
@@ -469,15 +480,18 @@ async function processAgentMessage({
           }
         }
 
-        // ── Handle text ────────────────────────────────────────
+        // ── Handle text (with chunking for long messages) ─────
         if (!text.trim()) return;
 
         try {
-          // Agent mode: reply via API to the sender (DM, even for group messages)
-          await agentSendText({ agent: agentConfig, toUser: fromUser, text });
+          const chunks = splitTextByByteLimit(text);
+          for (const chunk of chunks) {
+            await agentSendText({ agent: agentConfig, toUser: fromUser, text: chunk });
+          }
           logger.info("[agent-inbound] reply delivered", {
             kind: info.kind,
             to: fromUser,
+            chunks: chunks.length,
             contentPreview: text.substring(0, 50),
           });
         } catch (err) {

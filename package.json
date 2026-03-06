@@ -1,6 +1,6 @@
 {
     "name": "@sunnoy/wecom",
-    "version": "1.8.0",
+    "version": "1.9.0",
     "description": "Enterprise WeChat AI Bot channel plugin for OpenClaw",
     "type": "module",
     "main": "index.js",
@@ -28,9 +28,7 @@
     },
     "scripts": {
         "test": "npm run test:unit",
-        "test:unit": "node --test tests/*.test.js",
-        "test:e2e": "node --test tests/e2e/*.e2e.test.js",
-        "test:e2e:ali-ai": "bash tests/e2e/run-ali-ai.sh"
+        "test:unit": "node --test tests/*.test.js"
     },
     "openclaw": {
         "extensions": [

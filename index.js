@@ -4,45 +4,50 @@ import { wecomChannelPlugin } from "./wecom/channel-plugin.js";
 import { wecomHttpHandler } from "./wecom/http-handler.js";
 import { responseUrls, setOpenclawConfig, setRuntime, streamMeta } from "./wecom/state.js";
 
-// Periodic cleanup for streamMeta and expired responseUrls to prevent memory leaks.
-setInterval(() => {
-  const now = Date.now();
-  // Clean streamMeta entries whose stream no longer exists in streamManager.
-  for (const streamId of streamMeta.keys()) {
-    if (!streamManager.hasStream(streamId)) {
-      streamMeta.delete(streamId);
-    }
-  }
-  // Clean expired responseUrls (older than 1 hour).
-  for (const [key, entry] of responseUrls.entries()) {
-    if (now > entry.expiresAt) {
-      responseUrls.delete(key);
-    }
-  }
-}, 60 * 1000).unref();
+function emptyPluginConfigSchema() {
+  return {
+    safeParse(value) {
+      if (value === undefined) return { success: true, data: undefined };
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return { success: false, error: { message: "expected config object" } };
+      }
+      return { success: true, data: value };
+    },
+  };
+}
+
+let cleanupTimer = null;
 
 const plugin = {
-  // Plugin id should match `openclaw.plugin.json` id (and config.plugins.entries key).
   id: "wecom",
   name: "Enterprise WeChat",
   description: "Enterprise WeChat AI Bot channel plugin for OpenClaw",
-  configSchema: { type: "object", additionalProperties: true, properties: {} },
+  configSchema: emptyPluginConfigSchema(),
   register(api) {
     logger.info("WeCom plugin registering...");
 
-    // Save runtime for message processing
     setRuntime(api.runtime);
     setOpenclawConfig(api.config);
 
-    // Register channel
+    if (cleanupTimer) clearInterval(cleanupTimer);
+    cleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const streamId of streamMeta.keys()) {
+        if (!streamManager.hasStream(streamId)) {
+          streamMeta.delete(streamId);
+        }
+      }
+      for (const [key, entry] of responseUrls.entries()) {
+        if (now > entry.expiresAt) {
+          responseUrls.delete(key);
+        }
+      }
+    }, 60_000);
+    cleanupTimer.unref();
+
     api.registerChannel({ plugin: wecomChannelPlugin });
     logger.info("WeCom channel registered");
 
-    // Register webhook HTTP route with auth: "plugin" so gateway does NOT
-    // enforce Bearer-token auth. WeCom callbacks use msg_signature verification
-    // which the plugin handles internally.
-    // OpenClaw 3.2 removed registerHttpHandler; use registerHttpRoute with
-    // auth: "plugin" + match: "prefix" to handle all /webhooks/* paths.
     api.registerHttpRoute({
       path: "/webhooks",
       handler: wecomHttpHandler,

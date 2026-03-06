@@ -14,6 +14,7 @@ import { webhookSendImage, webhookSendText, webhookUploadFile, webhookSendFile }
 import { normalizeWebhookPath, registerWebhookTarget } from "./webhook-targets.js";
 import { wecomFetch, setConfigProxyUrl } from "./http.js";
 import { setApiBaseUrl } from "./constants.js";
+import { splitTextByByteLimit } from "../utils.js";
 
 
 const AGENT_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "gif", "bmp"]);
@@ -46,7 +47,7 @@ export const wecomChannelPlugin = {
     schema: {
       $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
-      additionalProperties: false,
+      additionalProperties: true,
       properties: {
         enabled: {
           type: "boolean",
@@ -283,6 +284,7 @@ export const wecomChannelPlugin = {
   },
   // Outbound adapter: all replies are streamed for WeCom AI Bot compatibility.
   outbound: {
+    deliveryMode: "direct",
     sendText: async ({ cfg: _cfg, to, text, accountId: _accountId }) => {
       // `to` format: "wecom:userid" or "userid".
       const userId = to.replace(/^wecom:/, "");
@@ -399,10 +401,14 @@ export const wecomChannelPlugin = {
       if (agentConfig) {
         try {
           const agentTarget = (target && !target.webhook) ? target : { toUser: userId };
-          await agentSendText({ agent: agentConfig, ...agentTarget, text });
+          const chunks = splitTextByByteLimit(text);
+          for (const chunk of chunks) {
+            await agentSendText({ agent: agentConfig, ...agentTarget, text: chunk });
+          }
           logger.info("WeCom: sent via Agent API fallback (sendText)", {
             userId,
             to,
+            chunks: chunks.length,
             contentPreview: text.substring(0, 50),
           });
           return {

@@ -274,10 +274,21 @@ export async function processInboundMessage({
     },
   });
 
-  // Override default route with deterministic dynamic agent session key.
-  if (targetAgentId) {
+  // Override default route with deterministic dynamic agent session key,
+  // but respect explicit bindings configured for this channel + account.
+  const hasExplicitBinding = Array.isArray(config?.bindings) &&
+    config.bindings.some((b) =>
+      b.match?.channel === "wecom" && b.match?.accountId === account.accountId,
+    );
+
+  if (targetAgentId && !hasExplicitBinding) {
     route.agentId = targetAgentId;
     route.sessionKey = `agent:${targetAgentId}:${peerKind}:${peerId}`;
+  } else if (hasExplicitBinding) {
+    logger.debug("WeCom: explicit binding found, skipping dynamic agent override", {
+      accountId: account.accountId,
+      resolvedAgentId: route.agentId,
+    });
   }
 
   // Build inbound context

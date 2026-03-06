@@ -9,7 +9,6 @@
 - [前置要求](#前置要求)
 - [安装](#安装)
 - [运行测试](#运行测试)
-- [运行真实 E2E 测试（远程 OpenClaw）](#运行真实-e2e-测试远程-openclaw)
 
 ### 配置与接入
 - [配置](#配置)
@@ -25,6 +24,7 @@
 - [流式回复能力](#流式回复能力)
 - [管理员用户](#管理员用户)
 - [动态 Agent 路由](#动态-agent-路由)
+- [Bindings 路由（多 Agent 绑定）](#bindings-路由多-agent-绑定)
 - [支持的目标格式](#支持的目标格式)
 - [指令白名单](#指令白名单)
 - [消息防抖合并](#消息防抖合并)
@@ -101,50 +101,6 @@ npm test
 ```
 
 运行单元测试（使用 Node.js 内置测试运行器）。
-
-### 运行真实 E2E 测试（远程 OpenClaw）
-
-本项目新增了真实联调 e2e 用例（`tests/e2e/remote-wecom.e2e.test.js`），会对真实 `/webhooks/wecom` 做加密请求、验证握手、发送消息并轮询 stream 直到结束。
-
-1. 使用你当前环境的 `ssh ali-ai` 一键执行（自动读取远程 `~/.openclaw/openclaw.json`，并建立本地隧道）：
-
-```bash
-npm run test:e2e:ali-ai
-```
-
-2. 或者手动指定环境变量执行：
-
-```bash
-E2E_WECOM_BASE_URL=http://127.0.0.1:28789 \
-E2E_WECOM_TOKEN=xxx \
-E2E_WECOM_ENCODING_AES_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-E2E_WECOM_WEBHOOK_PATH=/webhooks/wecom \
-npm run test:e2e
-```
-
-可选变量：
-- `E2E_WECOM_TEST_USER`（默认 `wecom-e2e-user`）
-- `E2E_WECOM_TEST_COMMAND`（默认 `/status`）
-- `E2E_WECOM_POLL_INTERVAL_MS`（默认 `1200`）
-- `E2E_WECOM_STREAM_TIMEOUT_MS`（默认 `90000`）
-- `E2E_WECOM_ENABLE_BROWSER_CASE`（默认 `1`，设置 `0` 可跳过浏览器场景）
-- `E2E_WECOM_BROWSER_TIMEOUT_MS`（默认 `180000`）
-- `E2E_WECOM_BROWSER_REQUIRE_IMAGE`（默认 `0`，设置 `1` 强制断言 `msg_item` 图片出站）
-- `E2E_WECOM_BROWSER_PROMPT`（浏览器场景自定义提示词）
-- `E2E_WECOM_BROWSER_BING_PDF_PROMPT`（Bing + 保存 PDF 场景提示词）
-- `E2E_WECOM_ENABLE_BROWSER_BING_PDF_CASE`（默认 `1`）
-- `E2E_BROWSER_PREPARE_MODE`（`check`/`install`/`off`，默认 `check`）
-- `E2E_BROWSER_REQUIRE_READY`（默认 `0`，设置 `1` 时浏览器环境不满足则中止）
-- `E2E_COLLECT_BROWSER_PDF`（默认 `1`，执行后自动收集远程 sandbox 中的 PDF）
-- `E2E_PDF_OUTPUT_DIR`（默认 `tests/e2e/artifacts`）
-- `E2E_CLEANUP_TEST_RESOURCES`（默认 `1`，测试结束后清理远程创建的测试 Agent 目录和工作区）
-- `E2E_CLEANUP_ONLY_ON_SUCCESS`（默认 `1`，仅在测试通过后清理；设为 `0` 则失败时也清理）
-- `E2E_CLEANUP_DRY_RUN`（默认 `0`，设为 `1` 只打印待删除资源，不实际删除）
-
-> 说明：`test:e2e:ali-ai` 会消耗远程实例的真实 LLM token，并覆盖多种真实入站/出站场景（含浏览器相关场景）。
-> 说明：执行 `test:e2e:ali-ai` 会先做 browser sandbox 准备检查（`prepare-browser-sandbox.sh`），测试后会尝试抓取 PDF 产物（`collect-browser-pdf.sh`）供用户下载。
-> 说明：默认会在测试通过后清理远程 `~/.openclaw/agents/<test-agent>`、`~/.openclaw/workspace-<test-agent>` 以及对应的 Docker 沙箱容器和 `containers.json` 元数据，避免真机环境残留动态 Agent。
-> 说明：当 browser sandbox 未就绪（缺浏览器二进制或缺 `browser` skill）时，Bing+PDF case 会自动跳过，并在准备检查输出中标记 `STATUS=MISSING`。
 
 ## 配置
 
@@ -661,6 +617,49 @@ openclaw agent --agent myagent \
 
 模板目录中的文件会复制到动态 Agent 的工作区（`~/.openclaw/workspace-<agentId>/`），仅当目标文件不存在时才会复制。
 
+## Bindings 路由（多 Agent 绑定）
+
+通过 OpenClaw 的 `bindings` 配置，可以将不同的 WeCom 账户绑定到不同的 Agent，实现多 Agent 精确路由。
+
+### 配置示例
+
+```json
+{
+  "bindings": [
+    {
+      "agentId": "amy",
+      "match": {
+        "channel": "wecom",
+        "accountId": "bot1"
+      }
+    },
+    {
+      "agentId": "bob",
+      "match": {
+        "channel": "wecom",
+        "accountId": "bot2"
+      }
+    }
+  ]
+}
+```
+
+### 工作原理
+
+1. 当消息到达时，插件检查 `bindings` 中是否有匹配当前 `channel: "wecom"` 和 `accountId` 的条目
+2. 如果匹配到 binding，使用 binding 指定的 `agentId` 路由，**不会被动态 Agent 覆盖**
+3. 如果没有匹配的 binding，按正常的动态 Agent 路由逻辑处理
+
+### 与动态 Agent 的关系
+
+| 场景 | 路由结果 |
+|------|---------|
+| 有匹配 binding | 使用 binding 中的 `agentId` |
+| 无 binding + 动态 Agent 开启 | 自动生成 `wecom-dm-<userId>` 等 |
+| 无 binding + 动态 Agent 关闭 | 使用默认 Agent |
+
+> 💡 **典型场景**：多账号模式下，`bot1` 的所有消息路由到 `amy` Agent，`bot2` 的消息路由到 `bob` Agent，各自拥有独立的指令集和上下文。
+
 ## 支持的目标格式
 
 插件支持多种目标格式，用于消息路由和 Webhook 发送：
@@ -948,13 +947,18 @@ openclaw-plugin-wecom/
 │   ├── webhook-targets.js   # Webhook 目标管理
 │   └── workspace-template.js # 工作区模板
 ├── tests/                   # 测试目录
-│   ├── e2e/
-│   │   ├── remote-wecom.e2e.test.js # 真实远程 E2E（加密请求 + stream 轮询）
-│   │   └── run-ali-ai.sh    # ssh ali-ai 一键联调脚本
-│   │   ├── prepare-browser-sandbox.sh # browser sandbox 环境检查/准备
-│   │   └── collect-browser-pdf.sh # 收集并下载 PDF 测试产物
+│   ├── accounts-reserved-keys.test.js # 多账号保留键测试
+│   ├── api-base-url.test.js # API 基础 URL 测试
+│   ├── channel-plugin.media-type.test.js # 媒体类型测试
+│   ├── dynamic-agent.test.js # 动态 Agent 路由测试
+│   ├── http-handler.test.js # HTTP 处理器测试
+│   ├── inbound-processor.image-merge.test.js # 图片合并测试
+│   ├── issue-fixes.test.js  # Issue 修复验证测试
 │   ├── outbound.test.js     # 出站投递回退逻辑测试
+│   ├── outbound-security.test.js # 出站安全测试
 │   ├── target.test.js       # 目标解析器测试
+│   ├── think-parser.test.js # 思考标签解析测试
+│   ├── workspace-template.test.js # 工作区模板测试
 │   └── xml-parser.test.js   # XML 解析器测试
 ├── README.md                # 本文档
 ├── CONTRIBUTING.md          # 贡献指南
