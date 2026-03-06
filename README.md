@@ -137,9 +137,13 @@ npm run test:e2e
 - `E2E_BROWSER_REQUIRE_READY`（默认 `0`，设置 `1` 时浏览器环境不满足则中止）
 - `E2E_COLLECT_BROWSER_PDF`（默认 `1`，执行后自动收集远程 sandbox 中的 PDF）
 - `E2E_PDF_OUTPUT_DIR`（默认 `tests/e2e/artifacts`）
+- `E2E_CLEANUP_TEST_RESOURCES`（默认 `1`，测试结束后清理远程创建的测试 Agent 目录和工作区）
+- `E2E_CLEANUP_ONLY_ON_SUCCESS`（默认 `1`，仅在测试通过后清理；设为 `0` 则失败时也清理）
+- `E2E_CLEANUP_DRY_RUN`（默认 `0`，设为 `1` 只打印待删除资源，不实际删除）
 
 > 说明：`test:e2e:ali-ai` 会消耗远程实例的真实 LLM token，并覆盖多种真实入站/出站场景（含浏览器相关场景）。
 > 说明：执行 `test:e2e:ali-ai` 会先做 browser sandbox 准备检查（`prepare-browser-sandbox.sh`），测试后会尝试抓取 PDF 产物（`collect-browser-pdf.sh`）供用户下载。
+> 说明：默认会在测试通过后清理远程 `~/.openclaw/agents/<test-agent>`、`~/.openclaw/workspace-<test-agent>` 以及对应的 Docker 沙箱容器和 `containers.json` 元数据，避免真机环境残留动态 Agent。
 > 说明：当 browser sandbox 未就绪（缺浏览器二进制或缺 `browser` skill）时，Bing+PDF case 会自动跳过，并在准备检查输出中标记 `STATUS=MISSING`。
 
 ## 配置

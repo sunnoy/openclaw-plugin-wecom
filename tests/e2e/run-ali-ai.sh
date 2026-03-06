@@ -8,6 +8,18 @@ SSH_HOST="${E2E_REMOTE_SSH_HOST:-ali-ai}"
 REMOTE_PORT="${E2E_REMOTE_OPENCLAW_PORT:-18789}"
 LOCAL_PORT="${E2E_LOCAL_TUNNEL_PORT:-28789}"
 
+derive_agent_webhook_path() {
+  local bot_path="${1:-/webhooks/wecom}"
+  case "$bot_path" in
+    /webhooks/wecom/*)
+      printf '/webhooks/app/%s\n' "${bot_path#/webhooks/wecom/}"
+      ;;
+    *)
+      printf '/webhooks/app\n'
+      ;;
+  esac
+}
+
 fetch_remote_wecom_config() {
   ssh "$SSH_HOST" "node -e \"const fs=require('fs');const p=process.env.HOME+'/.openclaw/openclaw.json';const cfg=JSON.parse(fs.readFileSync(p,'utf8'));const w=cfg?.channels?.wecom||{};const a=w.agent||{};process.stdout.write(JSON.stringify({token:w.token||'',aes:w.encodingAesKey||'',path:w.webhookPath||'/webhooks/wecom',agentToken:a.token||'',agentAes:a.encodingAesKey||'',corpId:a.corpId||'',corpSecret:a.corpSecret||'',agentId:String(a.agentId||'')}));\""
 }
@@ -51,6 +63,7 @@ ssh -M -S "$SOCK_FILE" -fnNT -L "${LOCAL_PORT}:127.0.0.1:${REMOTE_PORT}" "$SSH_H
 
 export E2E_WECOM_BASE_URL="http://127.0.0.1:${LOCAL_PORT}"
 export NO_PROXY="127.0.0.1,localhost"
+export E2E_WECOM_AGENT_WEBHOOK_PATH="${E2E_WECOM_AGENT_WEBHOOK_PATH:-$(derive_agent_webhook_path "${E2E_WECOM_WEBHOOK_PATH:-/webhooks/wecom}")}"
 
 cd "$PROJECT_ROOT"
 echo "[e2e] target=${SSH_HOST} tunnel=127.0.0.1:${LOCAL_PORT}->127.0.0.1:${REMOTE_PORT} webhook=${E2E_WECOM_WEBHOOK_PATH}"
@@ -91,4 +104,29 @@ if [[ "${E2E_COLLECT_BROWSER_PDF:-1}" == "1" ]]; then
   bash "$SCRIPT_DIR/collect-browser-pdf.sh" || true
 fi
 
-exit "$test_exit"
+cleanup_exit=0
+cleanup_enabled="${E2E_CLEANUP_TEST_RESOURCES:-1}"
+cleanup_only_on_success="${E2E_CLEANUP_ONLY_ON_SUCCESS:-1}"
+
+if [[ "$cleanup_enabled" != "0" ]]; then
+  if (( test_exit == 0 )) || [[ "$cleanup_only_on_success" == "0" ]]; then
+    set +e
+    E2E_REMOTE_SSH_HOST="$SSH_HOST" \
+    E2E_WECOM_TEST_USER="${E2E_WECOM_TEST_USER:-wecom-e2e-user}" \
+    E2E_WECOM_AGENT_TEST_USER="${E2E_WECOM_AGENT_TEST_USER:-e2e-agent-user}" \
+    bash "$SCRIPT_DIR/cleanup-remote-test-resources.sh"
+    cleanup_exit=$?
+    set -e
+    if (( cleanup_exit != 0 )); then
+      echo "[e2e] remote test resource cleanup failed (exit=${cleanup_exit})" >&2
+    fi
+  else
+    echo "[e2e] skip remote test resource cleanup because tests failed (set E2E_CLEANUP_ONLY_ON_SUCCESS=0 to override)"
+  fi
+fi
+
+if (( test_exit != 0 )); then
+  exit "$test_exit"
+fi
+
+exit "$cleanup_exit"
