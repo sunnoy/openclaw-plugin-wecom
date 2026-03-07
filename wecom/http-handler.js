@@ -95,6 +95,7 @@ async function handleWecomRequest(req, res, targets, query, path) {
     const webhook = new WecomWebhook({
       token: target.account.token,
       encodingAesKey: target.account.encodingAesKey,
+      accountId: target.account.accountId,
     });
 
     const echo = webhook.handleVerify(query);
@@ -145,6 +146,7 @@ async function handleWecomRequest(req, res, targets, query, path) {
     const webhook = new WecomWebhook({
       token: target.account.token,
       encodingAesKey: target.account.encodingAesKey,
+      accountId: target.account.accountId,
     });
 
     const result = await webhook.handleMessage(query, body);
