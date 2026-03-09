@@ -21,6 +21,7 @@ export class WecomWebhook {
 
   constructor(config) {
     this.config = config;
+    this.accountId = config.accountId || "";
     this.crypto = new WecomCrypto(config.token, config.encodingAesKey);
     logger.debug("WecomWebhook initialized (AI Bot mode)");
   }
@@ -163,6 +164,7 @@ export class WecomWebhook {
       }
 
       logger.info("Received text message", {
+        accountId: this.accountId,
         fromUser,
         chatType,
         chatId: chatId || "(private)",
@@ -207,7 +209,7 @@ export class WecomWebhook {
         return WecomWebhook.DUPLICATE;
       }
 
-      logger.info("Received image message", { fromUser, chatType, imageUrl });
+      logger.info("Received image message", { accountId: this.accountId, fromUser, chatType, imageUrl });
 
       return {
         message: {
@@ -243,6 +245,7 @@ export class WecomWebhook {
       }
 
       logger.info("Received voice message (auto-transcribed by WeCom)", {
+        accountId: this.accountId,
         fromUser,
         chatType,
         chatId: chatId || "(private)",
@@ -299,6 +302,7 @@ export class WecomWebhook {
       const content = textParts.join("\n");
 
       logger.info("Received mixed message", {
+        accountId: this.accountId,
         fromUser,
         chatType,
         chatId: chatId || "(private)",
@@ -335,7 +339,7 @@ export class WecomWebhook {
         return WecomWebhook.DUPLICATE;
       }
 
-      logger.info("Received file message", { fromUser, fileName, fileUrl: fileUrl.substring(0, 80) });
+      logger.info("Received file message", { accountId: this.accountId, fromUser, fileName, fileUrl: fileUrl.substring(0, 80) });
 
       return {
         message: {
@@ -369,7 +373,7 @@ export class WecomWebhook {
         ? `[位置] ${name} (${latitude}, ${longitude})`
         : `[位置] ${latitude}, ${longitude}`;
 
-      logger.info("Received location message", { fromUser, latitude, longitude, name });
+      logger.info("Received location message", { accountId: this.accountId, fromUser, latitude, longitude, name });
 
       return {
         message: {
@@ -404,7 +408,7 @@ export class WecomWebhook {
       if (url) parts.push(url);
       const content = parts.join("\n") || "[链接]";
 
-      logger.info("Received link message", { fromUser, title, url: url.substring(0, 80) });
+      logger.info("Received link message", { accountId: this.accountId, fromUser, title, url: url.substring(0, 80) });
 
       return {
         message: {
