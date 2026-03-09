@@ -1,8 +1,8 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "../logger.js";
-import { BOOTSTRAP_FILENAMES } from "./constants.js";
+import { BOOTSTRAP_FILENAMES, SYSTEM_PROMPT_FILENAME } from "./constants.js";
 import {
   getEnsureDynamicAgentWriteQueue,
   getEnsuredDynamicAgentIds,
@@ -122,6 +122,28 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
       } else {
         copyFileSync(src, dest);
         logger.info("WeCom: seeded workspace file", { agentId, file });
+      }
+    }
+
+    // Merge system-prompt.md into SOUL.md so core injects the content into the
+    // LLM context.  Core does not read system-prompt.md directly.
+    const sysPromptSrc = join(templateDir, SYSTEM_PROMPT_FILENAME);
+    if (existsSync(sysPromptSrc)) {
+      const sysPromptContent = readFileSync(sysPromptSrc, "utf-8").trim();
+      if (sysPromptContent) {
+        const soulDest = join(workspaceDir, "SOUL.md");
+        const soulSrc = join(templateDir, "SOUL.md");
+
+        let merged = sysPromptContent;
+        if (existsSync(soulSrc)) {
+          const soulTemplate = readFileSync(soulSrc, "utf-8").trim();
+          if (soulTemplate) {
+            merged = sysPromptContent + "\n\n" + soulTemplate;
+          }
+        }
+
+        writeFileSync(soulDest, merged + "\n");
+        logger.info("WeCom: injected system-prompt.md into SOUL.md", { agentId });
       }
     }
 

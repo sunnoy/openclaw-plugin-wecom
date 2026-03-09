@@ -21,7 +21,11 @@ export const DEFAULT_COMMAND_BLOCK_MESSAGE = `⚠️ 该命令不可用。
 • **/help** - 查看帮助
 • **/status** - 查看状态`;
 
-// Files recognised by openclaw core as bootstrap files.
+// Files copied to dynamic agent workspaces during seeding.
+// Core-recognised bootstrap files (injected into LLM context by core):
+//   AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md
+// system-prompt.md is NOT read by core directly — its content is merged into
+// SOUL.md during seeding so the LLM can see it.
 export const BOOTSTRAP_FILENAMES = new Set([
   "AGENTS.md",
   "SOUL.md",
@@ -32,6 +36,8 @@ export const BOOTSTRAP_FILENAMES = new Set([
   "BOOTSTRAP.md",
   "system-prompt.md",
 ]);
+
+export const SYSTEM_PROMPT_FILENAME = "system-prompt.md";
 
 // Per-user message debounce buffer.
 // Collects messages arriving within DEBOUNCE_MS into a single dispatch.

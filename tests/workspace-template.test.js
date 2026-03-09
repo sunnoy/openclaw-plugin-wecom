@@ -67,18 +67,22 @@ describe("seedAgentWorkspace", () => {
     rmSync(templateDir, { recursive: true, force: true });
   });
 
-  it("copies system-prompt.md from template to agent workspace", () => {
-    const content = "You are IT小刘, a helpful IT assistant.";
+  it("copies system-prompt.md and creates SOUL.md from it", () => {
+    const content = "You are TestBot, a helpful assistant.";
     writeFileSync(join(templateDir, "system-prompt.md"), content);
 
     seedAgentWorkspace("wecom-dm-test", {}, templateDir);
 
-    const dest = join(stateDir, "workspace-wecom-dm-test", "system-prompt.md");
-    assert.equal(existsSync(dest), true);
-    assert.equal(readFileSync(dest, "utf8"), content);
+    const wsDir = join(stateDir, "workspace-wecom-dm-test");
+    // system-prompt.md is still copied for reference
+    assert.equal(existsSync(join(wsDir, "system-prompt.md")), true);
+    assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), content);
+    // SOUL.md is created from system-prompt.md so core can inject it
+    assert.equal(existsSync(join(wsDir, "SOUL.md")), true);
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), content + "\n");
   });
 
-  it("copies IDENTITY.md alongside system-prompt.md", () => {
+  it("copies IDENTITY.md alongside system-prompt.md and creates SOUL.md", () => {
     writeFileSync(join(templateDir, "system-prompt.md"), "system prompt");
     writeFileSync(join(templateDir, "IDENTITY.md"), "identity");
 
@@ -87,6 +91,8 @@ describe("seedAgentWorkspace", () => {
     const wsDir = join(stateDir, "workspace-wecom-dm-test2");
     assert.equal(existsSync(join(wsDir, "system-prompt.md")), true);
     assert.equal(existsSync(join(wsDir, "IDENTITY.md")), true);
+    assert.equal(existsSync(join(wsDir, "SOUL.md")), true);
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), "system prompt\n");
   });
 
   it("skips non-bootstrap files in template directory", () => {
@@ -108,6 +114,8 @@ describe("seedAgentWorkspace", () => {
     const wsDir = join(stateDir, "workspace-wecom-dm-test4");
     assert.equal(existsSync(join(wsDir, "IDENTITY.md")), true);
     assert.equal(existsSync(join(wsDir, "system-prompt.md")), false);
+    // No SOUL.md should be created when there's no system-prompt.md
+    assert.equal(existsSync(join(wsDir, "SOUL.md")), false);
   });
 
   it("re-seeds workspace file when template is updated", () => {
@@ -116,8 +124,10 @@ describe("seedAgentWorkspace", () => {
     writeFileSync(join(templateDir, "system-prompt.md"), original);
 
     seedAgentWorkspace("wecom-dm-reseed", {}, templateDir);
-    const dest = join(stateDir, "workspace-wecom-dm-reseed", "system-prompt.md");
+    const wsDir = join(stateDir, "workspace-wecom-dm-reseed");
+    const dest = join(wsDir, "system-prompt.md");
     assert.equal(readFileSync(dest, "utf8"), original);
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), original + "\n");
 
     // Update template content and push mtime forward
     clearTemplateMtimeCache();
@@ -127,6 +137,7 @@ describe("seedAgentWorkspace", () => {
 
     seedAgentWorkspace("wecom-dm-reseed", {}, templateDir);
     assert.equal(readFileSync(dest, "utf8"), updated);
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), updated + "\n");
   });
 
   it("does not overwrite workspace file when template is unchanged", () => {
@@ -155,11 +166,11 @@ describe("seedAgentWorkspace", () => {
     utimesSync(join(wsDir, "IDENTITY.md"), futureTime, futureTime);
 
     // Template has older mtime but correct content
-    writeFileSync(join(templateDir, "IDENTITY.md"), "IT小刘 identity");
+    writeFileSync(join(templateDir, "IDENTITY.md"), "TestBot identity");
 
     seedAgentWorkspace("wecom-dm-firstseed", {}, templateDir);
 
-    assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "IT小刘 identity");
+    assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "TestBot identity");
   });
 
   it("only re-seeds the changed template file, leaves others intact", () => {
@@ -170,6 +181,7 @@ describe("seedAgentWorkspace", () => {
     const wsDir = join(stateDir, "workspace-wecom-dm-partial");
     assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp-original");
     assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "id-original");
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), "sp-original\n");
 
     // Modify workspace IDENTITY.md and push its mtime forward (simulates user edit)
     writeFileSync(join(wsDir, "IDENTITY.md"), "id-user-edit");
@@ -186,5 +198,61 @@ describe("seedAgentWorkspace", () => {
 
     assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp-updated");
     assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "id-user-edit");
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), "sp-updated\n");
+  });
+
+  // --- system-prompt.md → SOUL.md injection tests ---
+
+  it("merges system-prompt.md and SOUL.md when template has both", () => {
+    writeFileSync(join(templateDir, "system-prompt.md"), "You are TestBot");
+    writeFileSync(join(templateDir, "SOUL.md"), "Be professional and friendly");
+
+    seedAgentWorkspace("wecom-dm-merge", {}, templateDir);
+
+    const wsDir = join(stateDir, "workspace-wecom-dm-merge");
+    assert.equal(
+      readFileSync(join(wsDir, "SOUL.md"), "utf8"),
+      "You are TestBot\n\nBe professional and friendly\n",
+    );
+    // system-prompt.md is still copied for reference
+    assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "You are TestBot");
+  });
+
+  it("does not create SOUL.md when system-prompt.md is empty", () => {
+    writeFileSync(join(templateDir, "system-prompt.md"), "   \n  ");
+
+    seedAgentWorkspace("wecom-dm-empty-sp", {}, templateDir);
+
+    const wsDir = join(stateDir, "workspace-wecom-dm-empty-sp");
+    assert.equal(existsSync(join(wsDir, "system-prompt.md")), true);
+    assert.equal(existsSync(join(wsDir, "SOUL.md")), false);
+  });
+
+  it("preserves standalone SOUL.md when no system-prompt.md exists", () => {
+    writeFileSync(join(templateDir, "SOUL.md"), "soul content only");
+
+    seedAgentWorkspace("wecom-dm-soul-only", {}, templateDir);
+
+    const wsDir = join(stateDir, "workspace-wecom-dm-soul-only");
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), "soul content only");
+    assert.equal(existsSync(join(wsDir, "system-prompt.md")), false);
+  });
+
+  it("updates merged SOUL.md when system-prompt.md template changes", () => {
+    writeFileSync(join(templateDir, "system-prompt.md"), "v1 prompt");
+    writeFileSync(join(templateDir, "SOUL.md"), "soul part");
+
+    seedAgentWorkspace("wecom-dm-merge-reseed", {}, templateDir);
+    const wsDir = join(stateDir, "workspace-wecom-dm-merge-reseed");
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), "v1 prompt\n\nsoul part\n");
+
+    // Update system-prompt.md
+    clearTemplateMtimeCache();
+    const futureTime = Date.now() / 1000 + 10;
+    writeFileSync(join(templateDir, "system-prompt.md"), "v2 prompt");
+    utimesSync(join(templateDir, "system-prompt.md"), futureTime, futureTime);
+
+    seedAgentWorkspace("wecom-dm-merge-reseed", {}, templateDir);
+    assert.equal(readFileSync(join(wsDir, "SOUL.md"), "utf8"), "v2 prompt\n\nsoul part\n");
   });
 });
