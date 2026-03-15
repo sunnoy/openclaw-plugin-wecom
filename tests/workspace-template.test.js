@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { upsertAgentIdOnlyEntry, seedAgentWorkspace, clearTemplateMtimeCache } from "../wecom/workspace-template.js";
@@ -87,6 +87,7 @@ describe("seedAgentWorkspace", () => {
     const wsDir = join(stateDir, "workspace-wecom-dm-test2");
     assert.equal(existsSync(join(wsDir, "system-prompt.md")), true);
     assert.equal(existsSync(join(wsDir, "IDENTITY.md")), true);
+    assert.equal(existsSync(join(wsDir, ".openclaw", "wecom-template-state.json")), true);
   });
 
   it("skips non-bootstrap files in template directory", () => {
@@ -110,77 +111,72 @@ describe("seedAgentWorkspace", () => {
     assert.equal(existsSync(join(wsDir, "system-prompt.md")), false);
   });
 
-  it("re-seeds workspace file when template is updated", () => {
-    const original = "original content";
-    const updated = "updated content";
-    writeFileSync(join(templateDir, "system-prompt.md"), original);
+  it("seeds BOOTSTRAP.md before memory markers exist", () => {
+    writeFileSync(join(templateDir, "BOOTSTRAP.md"), "plugin bootstrap");
+    writeFileSync(join(templateDir, "IDENTITY.md"), "identity");
 
-    seedAgentWorkspace("wecom-dm-reseed", {}, templateDir);
-    const dest = join(stateDir, "workspace-wecom-dm-reseed", "system-prompt.md");
-    assert.equal(readFileSync(dest, "utf8"), original);
+    seedAgentWorkspace("wecom-dm-bootstrap", {}, templateDir);
 
-    // Update template content and push mtime forward
-    clearTemplateMtimeCache();
-    const futureTime = Date.now() / 1000 + 10;
-    writeFileSync(join(templateDir, "system-prompt.md"), updated);
-    utimesSync(join(templateDir, "system-prompt.md"), futureTime, futureTime);
-
-    seedAgentWorkspace("wecom-dm-reseed", {}, templateDir);
-    assert.equal(readFileSync(dest, "utf8"), updated);
+    const wsDir = join(stateDir, "workspace-wecom-dm-bootstrap");
+    assert.equal(existsSync(join(wsDir, "IDENTITY.md")), true);
+    assert.equal(readFileSync(join(wsDir, "BOOTSTRAP.md"), "utf8"), "plugin bootstrap");
   });
 
-  it("does not overwrite workspace file when template is unchanged", () => {
+  it("does not seed BOOTSTRAP.md when memory directory exists", () => {
+    writeFileSync(join(templateDir, "BOOTSTRAP.md"), "plugin bootstrap");
+    const wsDir = join(stateDir, "workspace-wecom-dm-no-bootstrap-memory-dir");
+    mkdirSync(join(wsDir, "memory"), { recursive: true });
+
+    seedAgentWorkspace("wecom-dm-no-bootstrap-memory-dir", {}, templateDir);
+
+    assert.equal(existsSync(join(wsDir, "BOOTSTRAP.md")), false);
+  });
+
+  it("does not seed BOOTSTRAP.md when MEMORY.md exists", () => {
+    writeFileSync(join(templateDir, "BOOTSTRAP.md"), "plugin bootstrap");
+    const wsDir = join(stateDir, "workspace-wecom-dm-no-bootstrap-memory-file");
+    mkdirSync(wsDir, { recursive: true });
+    writeFileSync(join(wsDir, "MEMORY.md"), "# long-term memory");
+
+    seedAgentWorkspace("wecom-dm-no-bootstrap-memory-file", {}, templateDir);
+
+    assert.equal(existsSync(join(wsDir, "BOOTSTRAP.md")), false);
+  });
+
+  it("does not overwrite workspace file after state exists", () => {
     writeFileSync(join(templateDir, "system-prompt.md"), "template");
 
     seedAgentWorkspace("wecom-dm-nochange", {}, templateDir);
     const dest = join(stateDir, "workspace-wecom-dm-nochange", "system-prompt.md");
 
-    // Manually modify workspace file
     writeFileSync(dest, "user modified");
-    // Push dest mtime forward so it's newer than template
-    const futureTime = Date.now() / 1000 + 10;
-    utimesSync(dest, futureTime, futureTime);
+    writeFileSync(join(templateDir, "system-prompt.md"), "template updated");
 
-    clearTemplateMtimeCache({ agentSeedCache: false });
     seedAgentWorkspace("wecom-dm-nochange", {}, templateDir);
     assert.equal(readFileSync(dest, "utf8"), "user modified");
   });
 
-  it("overwrites core defaults on first seed even when dest is newer", () => {
-    // Simulate core writing a default IDENTITY.md with a newer mtime
-    const wsDir = join(stateDir, "workspace-wecom-dm-firstseed");
+  it("migrates legacy workspace to state without overwriting existing files", () => {
+    const wsDir = join(stateDir, "workspace-wecom-dm-legacy");
     mkdirSync(wsDir, { recursive: true });
-    writeFileSync(join(wsDir, "IDENTITY.md"), "core default identity");
-    const futureTime = Date.now() / 1000 + 60;
-    utimesSync(join(wsDir, "IDENTITY.md"), futureTime, futureTime);
+    writeFileSync(join(wsDir, "IDENTITY.md"), "legacy identity");
+    writeFileSync(join(templateDir, "IDENTITY.md"), "template identity");
 
-    // Template has older mtime but correct content
-    writeFileSync(join(templateDir, "IDENTITY.md"), "IT小刘 identity");
+    seedAgentWorkspace("wecom-dm-legacy", {}, templateDir);
 
-    seedAgentWorkspace("wecom-dm-firstseed", {}, templateDir);
-
-    assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "IT小刘 identity");
+    assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "legacy identity");
+    assert.equal(existsSync(join(wsDir, ".openclaw", "wecom-template-state.json")), true);
   });
 
-  it("only re-seeds the changed template file, leaves others intact", () => {
+  it("fills missing files after state exists without overwriting existing ones", () => {
     writeFileSync(join(templateDir, "system-prompt.md"), "sp-original");
     writeFileSync(join(templateDir, "IDENTITY.md"), "id-original");
 
     seedAgentWorkspace("wecom-dm-partial", {}, templateDir);
     const wsDir = join(stateDir, "workspace-wecom-dm-partial");
-    assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp-original");
-    assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "id-original");
-
-    // Modify workspace IDENTITY.md and push its mtime forward (simulates user edit)
     writeFileSync(join(wsDir, "IDENTITY.md"), "id-user-edit");
-    const futureWs = Date.now() / 1000 + 20;
-    utimesSync(join(wsDir, "IDENTITY.md"), futureWs, futureWs);
-
-    // Update only system-prompt.md template and push its mtime forward
-    clearTemplateMtimeCache({ agentSeedCache: false });
-    const futureTpl = Date.now() / 1000 + 30;
+    rmSync(join(wsDir, "system-prompt.md"));
     writeFileSync(join(templateDir, "system-prompt.md"), "sp-updated");
-    utimesSync(join(templateDir, "system-prompt.md"), futureTpl, futureTpl);
 
     seedAgentWorkspace("wecom-dm-partial", {}, templateDir);
 

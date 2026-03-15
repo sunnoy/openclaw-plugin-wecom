@@ -1,4 +1,13 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "../logger.js";
@@ -19,8 +28,10 @@ function expandTilde(p) {
 
 // --- mtime caches for force-reseed ---
 const _templateMtimeCache = new Map();   // templateDir → { maxMtimeMs, checkedAt }
-const _agentSeedMtimeCache = new Map();  // `${templateDir}::${agentId}` → maxMtimeMs
 const TEMPLATE_MTIME_CACHE_TTL_MS = 60_000;
+const TEMPLATE_STATE_DIRNAME = ".openclaw";
+const TEMPLATE_STATE_FILENAME = "wecom-template-state.json";
+const TEMPLATE_STATE_VERSION = 1;
 
 function getTemplateMaxMtimeMs(templateDir) {
   const now = Date.now();
@@ -43,7 +54,7 @@ function getTemplateMaxMtimeMs(templateDir) {
 
 export function clearTemplateMtimeCache({ agentSeedCache = true } = {}) {
   _templateMtimeCache.clear();
-  if (agentSeedCache) _agentSeedMtimeCache.clear();
+  void agentSeedCache;
 }
 
 /**
@@ -67,9 +78,76 @@ export function getWorkspaceTemplateDir(config) {
   return config?.channels?.wecom?.workspaceTemplate?.trim() || null;
 }
 
+function hasWorkspaceMemoryMarkers(workspaceDir) {
+  return existsSync(join(workspaceDir, "memory")) || existsSync(join(workspaceDir, "MEMORY.md"));
+}
+
+function resolveTemplateStatePath(workspaceDir) {
+  return join(workspaceDir, TEMPLATE_STATE_DIRNAME, TEMPLATE_STATE_FILENAME);
+}
+
+function readTemplateState(workspaceDir) {
+  const statePath = resolveTemplateStatePath(workspaceDir);
+  if (!existsSync(statePath)) {
+    return null;
+  }
+
+  try {
+    const raw = readFileSync(statePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    return {
+      version: parsed.version,
+      seededAt: typeof parsed.seededAt === "string" ? parsed.seededAt : null,
+      templateDir: typeof parsed.templateDir === "string" ? parsed.templateDir : null,
+      seededFiles: Array.isArray(parsed.seededFiles)
+        ? parsed.seededFiles.filter((file) => typeof file === "string")
+        : [],
+      templateMtimeMs:
+        typeof parsed.templateMtimeMs === "number" && Number.isFinite(parsed.templateMtimeMs)
+          ? parsed.templateMtimeMs
+          : null,
+      migratedFromLegacy: parsed.migratedFromLegacy === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeTemplateState(workspaceDir, state) {
+  const statePath = resolveTemplateStatePath(workspaceDir);
+  const stateDir = join(workspaceDir, TEMPLATE_STATE_DIRNAME);
+  mkdirSync(stateDir, { recursive: true });
+
+  const payload = `${JSON.stringify(
+    {
+      version: TEMPLATE_STATE_VERSION,
+      seededAt: state.seededAt,
+      templateDir: state.templateDir,
+      seededFiles: [...new Set(state.seededFiles)].sort(),
+      templateMtimeMs: state.templateMtimeMs,
+      migratedFromLegacy: state.migratedFromLegacy === true,
+    },
+    null,
+    2,
+  )}\n`;
+  const tmpPath = `${statePath}.tmp-${process.pid}-${Date.now().toString(36)}`;
+  writeFileSync(tmpPath, payload, "utf8");
+  renameSync(tmpPath, statePath);
+}
+
+function collectExistingSeededFiles(workspaceDir, templateFiles) {
+  return templateFiles.filter((file) => existsSync(join(workspaceDir, file)));
+}
+
 /**
- * Copy template files into a newly created agent's workspace directory.
- * Only copies files that don't already exist (writeFileIfMissing semantics).
+ * Copy selected template files into a dynamic agent workspace.
+ * BOOTSTRAP.md may be synced only before user memory markers appear; once the
+ * workspace has memory/ or MEMORY.md, bootstrap is treated as completed and is
+ * never re-seeded by the plugin.
  * Silently skips if workspaceTemplate is not configured or directory is missing.
  *
  * @param {string} agentId
@@ -89,33 +167,38 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
   }
 
   const workspaceDir = resolveAgentWorkspaceDirLocal(agentId);
+  const workspaceExistedBefore = existsSync(workspaceDir);
 
   try {
     const templateMaxMtimeMs = getTemplateMaxMtimeMs(templateDir);
-    const cacheKey = `${templateDir}::${agentId}`;
-    const lastSyncedMtimeMs = _agentSeedMtimeCache.get(cacheKey) ?? 0;
-    const isFirstSeed = lastSyncedMtimeMs === 0;
-
-    if (templateMaxMtimeMs <= lastSyncedMtimeMs && existsSync(workspaceDir)) {
-      return;
-    }
-
     mkdirSync(workspaceDir, { recursive: true });
 
-    const files = readdirSync(templateDir);
-    for (const file of files) {
-      if (!BOOTSTRAP_FILENAMES.has(file)) {
+    const templateFiles = readdirSync(templateDir).filter((file) => BOOTSTRAP_FILENAMES.has(file));
+    let state = readTemplateState(workspaceDir);
+    const isLegacyWorkspace = !state && workspaceExistedBefore;
+    const isFirstSeed = !state && !workspaceExistedBefore;
+
+    if (!state) {
+      state = {
+        version: TEMPLATE_STATE_VERSION,
+        seededAt: new Date().toISOString(),
+        templateDir,
+        seededFiles: isLegacyWorkspace ? collectExistingSeededFiles(workspaceDir, templateFiles) : [],
+        templateMtimeMs: templateMaxMtimeMs,
+        migratedFromLegacy: isLegacyWorkspace,
+      };
+    }
+
+    const bootstrapAllowed = !hasWorkspaceMemoryMarkers(workspaceDir);
+    for (const file of templateFiles) {
+      if (file === "BOOTSTRAP.md" && !bootstrapAllowed) {
         continue;
       }
       const src = join(templateDir, file);
       const dest = join(workspaceDir, file);
       if (existsSync(dest)) {
         if (!isFirstSeed) {
-          const srcMtimeMs = statSync(src).mtimeMs;
-          const destMtimeMs = statSync(dest).mtimeMs;
-          if (srcMtimeMs <= destMtimeMs) {
-            continue;
-          }
+          continue;
         }
         copyFileSync(src, dest);
         logger.info("WeCom: re-seeded workspace file", { agentId, file, isFirstSeed });
@@ -123,9 +206,12 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
         copyFileSync(src, dest);
         logger.info("WeCom: seeded workspace file", { agentId, file });
       }
+      state.seededFiles.push(file);
     }
 
-    _agentSeedMtimeCache.set(cacheKey, templateMaxMtimeMs);
+    state.templateDir = templateDir;
+    state.templateMtimeMs = templateMaxMtimeMs;
+    writeTemplateState(workspaceDir, state);
   } catch (err) {
     logger.warn("WeCom: failed to seed agent workspace", {
       agentId,

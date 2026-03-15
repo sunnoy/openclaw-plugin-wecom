@@ -24,6 +24,7 @@ const RESERVED_KEYS = new Set([
   "webhooks",
   "network",
   "defaultAccount",
+  "deliveryMode",
 ]);
 
 const SHARED_MULTI_ACCOUNT_KEYS = new Set([

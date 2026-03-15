@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { basename } from "node:path";
-import { readFile } from "node:fs/promises";
 import {
   buildBaseAccountStatusSnapshot,
   buildBaseChannelStatusSummary,
@@ -23,9 +22,10 @@ import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js"
 import { setConfigProxyUrl, wecomFetch } from "./http.js";
 import { wecomOnboardingAdapter } from "./onboarding.js";
 import { getAccountTelemetry, recordOutboundActivity } from "./runtime-telemetry.js";
-import { getRuntime, setOpenclawConfig } from "./state.js";
+import { getOpenclawConfig, getRuntime, setOpenclawConfig } from "./state.js";
 import { resolveWecomTarget } from "./target.js";
 import { webhookSendFile, webhookSendImage, webhookSendMarkdown, webhookUploadFile } from "./webhook-bot.js";
+import { loadOutboundMediaFromUrl as loadOutboundMediaFromUrlCompat } from "./openclaw-compat.js";
 import {
   CHANNEL_ID,
   DEFAULT_ACCOUNT_ID,
@@ -34,7 +34,10 @@ import {
   getWebhookBotSendUrl,
   setApiBaseUrl,
 } from "./constants.js";
+import { uploadAndSendMedia } from "./media-uploader.js";
+import { getExtendedMediaLocalRoots } from "./openclaw-compat.js";
 import { sendWsMessage, startWsMonitor } from "./ws-monitor.js";
+import { getWsClient } from "./ws-state.js";
 
 function normalizePairingEntry(entry) {
   return String(entry ?? "")
@@ -79,40 +82,32 @@ function normalizeMediaPath(mediaUrl) {
   return value;
 }
 
-async function loadMediaPayload(mediaUrl, { mediaLocalRoots } = {}) {
+async function loadMediaPayload(mediaUrl, { accountConfig, mediaLocalRoots } = {}) {
   const normalized = normalizeMediaPath(mediaUrl);
-  if (normalized.startsWith("/")) {
-    // Prefer core's loadWebMedia with sandbox enforcement when available.
-    const runtime = getRuntime();
-    if (typeof runtime?.media?.loadWebMedia === "function" && Array.isArray(mediaLocalRoots) && mediaLocalRoots.length > 0) {
-      const loaded = await runtime.media.loadWebMedia(normalized, { localRoots: mediaLocalRoots });
-      return {
-        buffer: loaded.buffer,
-        filename: loaded.fileName || basename(normalized) || "file",
-        contentType: loaded.contentType || "",
-      };
-    }
-    const buffer = await readFile(normalized);
-    return {
-      buffer,
-      filename: basename(normalized) || "file",
-      contentType: "",
-    };
-  }
+  let runtime = null;
+  try {
+    runtime = getRuntime();
+  } catch {}
 
-  const response = await wecomFetch(normalized);
-  if (!response.ok) {
-    throw new Error(`failed to download media: ${response.status}`);
-  }
+  const loaded = await loadOutboundMediaFromUrlCompat(normalized, {
+    accountConfig,
+    fetchImpl: wecomFetch,
+    mediaLocalRoots,
+    runtimeLoadMedia:
+      typeof runtime?.media?.loadWebMedia === "function"
+        ? (path, options) => runtime.media.loadWebMedia(path, options)
+        : undefined,
+  });
+
   return {
-    buffer: Buffer.from(await response.arrayBuffer()),
-    filename: basename(new URL(normalized).pathname) || "file",
-    contentType: response.headers.get("content-type") || "",
+    buffer: loaded.buffer,
+    filename: loaded.fileName || basename(normalized) || "file",
+    contentType: loaded.contentType || "",
   };
 }
 
-async function loadResolvedMedia(mediaUrl, { mediaLocalRoots } = {}) {
-  const media = await loadMediaPayload(mediaUrl, { mediaLocalRoots });
+async function loadResolvedMedia(mediaUrl, { accountConfig, mediaLocalRoots } = {}) {
+  const media = await loadMediaPayload(mediaUrl, { accountConfig, mediaLocalRoots });
   return {
     ...media,
     mediaType: resolveAgentMediaType(media.filename, media.contentType),
@@ -132,45 +127,6 @@ function resolveAgentMediaType(filename, contentType) {
 
 export function resolveAgentMediaTypeFromFilename(filename) {
   return resolveAgentMediaType(filename, "");
-}
-
-function resolveWsNoticeTarget(target, rawTo) {
-  if (target?.webhook || target?.toParty || target?.toTag) {
-    return null;
-  }
-  const fallback = String(rawTo ?? "").trim();
-  return target?.chatId || target?.toUser || fallback || null;
-}
-
-function buildUnsupportedMediaNotice({ text, mediaType, deliveredViaAgent }) {
-  let notice;
-  if (mediaType === "file") {
-    notice = deliveredViaAgent
-      ? "由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。"
-      : "由于当前企业微信bot不支持给用户发送文件，且当前未配置自建应用发送渠道。";
-  } else if (mediaType === "image") {
-    notice = deliveredViaAgent
-      ? "由于当前企业微信bot不支持直接发送图片，图片通过自建应用发送。"
-      : "由于当前企业微信bot不支持直接发送图片，且当前未配置自建应用发送渠道。";
-  } else {
-    notice = deliveredViaAgent
-      ? "由于当前企业微信bot不支持直接发送媒体，媒体通过自建应用发送。"
-      : "由于当前企业微信bot不支持直接发送媒体，且当前未配置自建应用发送渠道。";
-  }
-
-  return [text, notice].filter(Boolean).join("\n\n");
-}
-
-async function sendUnsupportedMediaNoticeViaWs({ to, text, mediaType, accountId }) {
-  return sendWsMessage({
-    to,
-    content: buildUnsupportedMediaNotice({
-      text,
-      mediaType,
-      deliveredViaAgent: true,
-    }),
-    accountId,
-  });
 }
 
 function resolveOutboundAccountId(cfg, accountId) {
@@ -199,7 +155,8 @@ async function sendViaWebhook({ cfg, accountId, webhookName, text, mediaUrl, pre
     return { channel: CHANNEL_ID, messageId: `wecom-webhook-${Date.now()}` };
   }
 
-  const { buffer, filename, mediaType } = preparedMedia ?? (await loadResolvedMedia(mediaUrl));
+  const { buffer, filename, mediaType } =
+    preparedMedia ?? (await loadResolvedMedia(mediaUrl, { accountConfig: account?.config }));
 
   if (text) {
     await webhookSendMarkdown({ url, content: text });
@@ -237,7 +194,8 @@ async function sendViaAgent({ cfg, accountId, target, text, mediaUrl, preparedMe
     return { channel: CHANNEL_ID, messageId: `wecom-agent-${Date.now()}` };
   }
 
-  const { buffer, filename, mediaType } = preparedMedia ?? (await loadResolvedMedia(mediaUrl));
+  const { buffer, filename, mediaType } =
+    preparedMedia ?? (await loadResolvedMedia(mediaUrl, { accountConfig: resolveAccount(cfg, accountId)?.config }));
   const mediaId = await agentUploadMedia({
     agent,
     type: mediaType,
@@ -308,6 +266,8 @@ export const wecomChannelPlugin = {
         allowFrom: { type: "array", items: { type: "string" } },
         groupPolicy: { enum: ["open", "allowlist", "disabled"] },
         groupAllowFrom: { type: "array", items: { type: "string" } },
+        deliveryMode: { enum: ["direct", "gateway"] },
+        mediaLocalRoots: { type: "array", items: { type: "string" } },
         agent: {
           type: "object",
           additionalProperties: true,
@@ -381,7 +341,29 @@ export const wecomChannelPlugin = {
   messaging: {
     normalizeTarget: (target) => {
       const trimmed = String(target ?? "").trim();
-      return trimmed || undefined;
+      if (!trimmed) {
+        return undefined;
+      }
+      const resolved = resolveWecomTarget(trimmed);
+      if (!resolved) {
+        return undefined;
+      }
+      if (resolved.webhook) {
+        return `webhook:${resolved.webhook}`;
+      }
+      if (resolved.toParty) {
+        return `party:${resolved.toParty}`;
+      }
+      if (resolved.toTag) {
+        return `tag:${resolved.toTag}`;
+      }
+      if (resolved.chatId) {
+        return `chat:${resolved.chatId}`;
+      }
+      if (resolved.toUser) {
+        return `user:${resolved.toUser}`;
+      }
+      return trimmed;
     },
     targetResolver: {
       looksLikeId: (value) => Boolean(String(value ?? "").trim()),
@@ -394,7 +376,14 @@ export const wecomChannelPlugin = {
     listGroups: async () => [],
   },
   outbound: {
-    deliveryMode: "direct",
+    get deliveryMode() {
+      try {
+        const cfg = getOpenclawConfig();
+        const mode = cfg?.channels?.wecom?.deliveryMode;
+        if (mode === "direct" || mode === "gateway") return mode;
+      } catch {}
+      return "gateway";
+    },
     chunker: (text, limit) => resolveRuntimeTextChunker(text, limit),
     textChunkLimit: TEXT_CHUNK_LIMIT,
     sendText: async ({ cfg, to, text, accountId }) => {
@@ -437,10 +426,11 @@ export const wecomChannelPlugin = {
       setOpenclawConfig(cfg);
       const account = applyNetworkConfig(cfg, resolvedAccountId);
       const target = resolveWecomTarget(to) ?? {};
-      const wsNoticeTarget = resolveWsNoticeTarget(target, to);
 
       if (target.webhook) {
-        const preparedMedia = mediaUrl ? await loadResolvedMedia(mediaUrl, { mediaLocalRoots }) : undefined;
+        const preparedMedia = mediaUrl
+          ? await loadResolvedMedia(mediaUrl, { accountConfig: account?.config, mediaLocalRoots })
+          : undefined;
         return sendViaWebhook({
           cfg,
           accountId: resolvedAccountId,
@@ -451,14 +441,6 @@ export const wecomChannelPlugin = {
         });
       }
 
-      const agentTarget =
-        target.toParty || target.toTag
-          ? target
-          : target.chatId
-            ? { chatId: target.chatId }
-            : { toUser: target.toUser || String(to).replace(/^wecom:/i, "") };
-      const preparedMedia = await loadResolvedMedia(mediaUrl, { mediaLocalRoots });
-
       if (target.toParty || target.toTag) {
         if (!account?.agentCredentials) {
           throw new Error("Agent API is required for party/tag media delivery");
@@ -466,61 +448,63 @@ export const wecomChannelPlugin = {
         return sendViaAgent({
           cfg,
           accountId: resolvedAccountId,
-          target: agentTarget,
+          target,
           text,
           mediaUrl,
-          preparedMedia,
+          preparedMedia: await loadResolvedMedia(mediaUrl, { accountConfig: account?.config, mediaLocalRoots }),
         });
       }
 
-      if (account?.agentCredentials) {
-        const agentResult = await sendViaAgent({
-          cfg,
-          accountId: resolvedAccountId,
-          target: agentTarget,
-          text: wsNoticeTarget ? undefined : text,
-          mediaUrl,
-          preparedMedia,
-        });
+      const chatId = target.chatId || target.toUser || String(to).replace(/^wecom:/i, "");
+      const wsClient = getWsClient(resolvedAccountId);
 
-        if (wsNoticeTarget) {
+      let textAlreadySent = false;
+      if (wsClient?.isConnected && mediaUrl) {
+        if (text) {
           try {
-            await sendUnsupportedMediaNoticeViaWs({
-              to: wsNoticeTarget,
-              text,
-              mediaType: preparedMedia.mediaType,
-              accountId: resolvedAccountId,
-            });
-          } catch (error) {
-            logger.warn(`[wecom] WS media notice failed, falling back to Agent text delivery: ${error.message}`);
-            if (text) {
-              await sendViaAgent({
-                cfg,
-                accountId: resolvedAccountId,
-                target: agentTarget,
-                text,
-              });
-            }
+            await sendWsMessage({ to: chatId, content: text, accountId: resolvedAccountId });
+            textAlreadySent = true;
+          } catch (textErr) {
+            logger.warn(`[wecom] WS text send failed before media upload: ${textErr.message}`);
           }
         }
 
-        return agentResult;
+        const extendedRoots = await getExtendedMediaLocalRoots({
+          accountConfig: account?.config,
+          mediaLocalRoots,
+        });
+        const result = await uploadAndSendMedia({
+          wsClient,
+          mediaUrl,
+          chatId,
+          mediaLocalRoots: extendedRoots,
+          log: (...args) => logger.info(...args),
+          errorLog: (...args) => logger.error(...args),
+        });
+
+        if (result.ok) {
+          recordOutboundActivity({ accountId: resolvedAccountId });
+          return { channel: CHANNEL_ID, messageId: result.messageId, chatId };
+        }
+        logger.warn(`[wecom] WS media upload failed, falling back: ${result.error || result.rejectReason}`);
       }
 
-      if (wsNoticeTarget) {
-        logger.warn("[wecom] Agent API is not configured for unsupported WS media; sending notice only");
-        return sendWsMessage({
-          to: wsNoticeTarget,
-          content: buildUnsupportedMediaNotice({
-            text,
-            mediaType: preparedMedia.mediaType,
-            deliveredViaAgent: false,
-          }),
+      const agentTarget = target.chatId
+        ? { chatId: target.chatId }
+        : { toUser: target.toUser || String(to).replace(/^wecom:/i, "") };
+
+      if (account?.agentCredentials) {
+        return sendViaAgent({
+          cfg,
           accountId: resolvedAccountId,
+          target: agentTarget,
+          text: textAlreadySent ? undefined : text,
+          mediaUrl,
+          preparedMedia: await loadResolvedMedia(mediaUrl, { accountConfig: account?.config, mediaLocalRoots }),
         });
       }
 
-      throw new Error("Agent API is not configured for unsupported WeCom media delivery");
+      throw new Error("No media delivery channel available: WS upload failed and Agent API is not configured");
     },
   },
   status: {
@@ -649,6 +633,4 @@ export const wecomChannelPlugin = {
   },
 };
 
-export const wecomChannelPluginTesting = {
-  buildUnsupportedMediaNotice,
-};
+export const wecomChannelPluginTesting = {};

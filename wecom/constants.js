@@ -26,6 +26,12 @@ export const REQID_FLUSH_DEBOUNCE_MS = 1_000;
 export const PENDING_REPLY_TTL_MS = 5 * 60 * 1000;
 export const PENDING_REPLY_MAX_SIZE = 50;
 
+export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const VIDEO_MAX_BYTES = 10 * 1024 * 1024;
+export const VOICE_MAX_BYTES = 2 * 1024 * 1024;
+export const FILE_MAX_BYTES = 20 * 1024 * 1024;
+export const ABSOLUTE_MAX_BYTES = FILE_MAX_BYTES;
+
 export const DEFAULT_MEDIA_MAX_MB = 5;
 export const TEXT_CHUNK_LIMIT = 4000;
 export const DEFAULT_WELCOME_MESSAGES = [

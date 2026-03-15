@@ -1,8 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import { wsMonitorTesting, buildReplyMediaGuidance } from "../wecom/ws-monitor.js";
 
-const { splitReplyMediaFromText, buildBodyForAgent } = wsMonitorTesting;
+const { splitReplyMediaFromText, buildBodyForAgent, normalizeReplyMediaUrlForLoad } = wsMonitorTesting;
 
 describe("splitReplyMediaFromText", () => {
   it("extracts MEDIA: on its own line", () => {
@@ -101,6 +103,30 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("MEDIA:/abs/path"));
     assert.ok(guidance.includes("FILE:/abs/path"));
     assert.ok(guidance.includes("Do NOT call message.send"));
+    assert.ok(guidance.includes("message.sendAttachment"));
+    assert.ok(guidance.includes("PDF must always use FILE:"));
+    assert.ok(guidance.includes("/workspace"));
+    assert.ok(guidance.includes("SKILL.md"));
+    assert.ok(guidance.includes("path prefixed with FILE:"));
     assert.ok(guidance.includes("its own line"));
+  });
+});
+
+describe("normalizeReplyMediaUrlForLoad", () => {
+  it("rewrites /workspace paths into the agent workspace dir", () => {
+    const expected = path.join(os.homedir(), ".openclaw", "workspace-test-agent", "skills", "deep-research", "SKILL.md");
+    const normalized = normalizeReplyMediaUrlForLoad("FILE:/workspace/skills/deep-research/SKILL.md".replace(/^FILE:/, ""), {}, "test-agent");
+    assert.equal(normalized, expected);
+  });
+
+  it("rewrites sandbox:/workspace paths into the agent workspace dir", () => {
+    const expected = path.join(os.homedir(), ".openclaw", "workspace-test-agent", "report.pdf");
+    const normalized = normalizeReplyMediaUrlForLoad("sandbox:/workspace/report.pdf", {}, "test-agent");
+    assert.equal(normalized, expected);
+  });
+
+  it("rejects /workspace traversal attempts", () => {
+    const normalized = normalizeReplyMediaUrlForLoad("/workspace/../secret.txt", {}, "test-agent");
+    assert.equal(normalized, "");
   });
 });

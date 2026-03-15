@@ -5,10 +5,11 @@
  * - #84: splitTextByByteLimit — Agent API long text chunking
  * - #85: Explicit bindings should prevent dynamic agent override
  */
-import { describe, it } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { splitTextByByteLimit } from "../utils.js";
 import { wecomChannelPlugin } from "../wecom/channel-plugin.js";
+import { setOpenclawConfig } from "../wecom/state.js";
 import plugin from "../index.js";
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -51,8 +52,36 @@ describe("configSchema (issue #78 + upstream alignment)", () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 describe("outbound deliveryMode (upstream alignment)", () => {
-  it("outbound adapter declares deliveryMode: 'direct'", () => {
+  afterEach(() => {
+    setOpenclawConfig(null);
+  });
+
+  it("defaults to 'gateway' when no config override", () => {
+    assert.equal(wecomChannelPlugin.outbound.deliveryMode, "gateway");
+  });
+
+  it("respects config override to 'direct'", () => {
+    setOpenclawConfig({ channels: { wecom: { deliveryMode: "direct" } } });
     assert.equal(wecomChannelPlugin.outbound.deliveryMode, "direct");
+  });
+
+  it("ignores invalid deliveryMode values", () => {
+    setOpenclawConfig({ channels: { wecom: { deliveryMode: "invalid" } } });
+    assert.equal(wecomChannelPlugin.outbound.deliveryMode, "gateway");
+  });
+});
+
+describe("messaging.normalizeTarget", () => {
+  it("treats prefixed and unprefixed DM targets as the same WeCom user", () => {
+    assert.equal(wecomChannelPlugin.messaging.normalizeTarget("lirui"), "user:lirui");
+    assert.equal(wecomChannelPlugin.messaging.normalizeTarget("wecom:lirui"), "user:lirui");
+    assert.equal(wecomChannelPlugin.messaging.normalizeTarget("wework:lirui"), "user:lirui");
+  });
+
+  it("canonicalizes explicit chat and group targets", () => {
+    assert.equal(wecomChannelPlugin.messaging.normalizeTarget("group:wr123"), "chat:wr123");
+    assert.equal(wecomChannelPlugin.messaging.normalizeTarget("chat:wr123"), "chat:wr123");
+    assert.equal(wecomChannelPlugin.messaging.normalizeTarget("wecom:group:wr123"), "chat:wr123");
   });
 });
 

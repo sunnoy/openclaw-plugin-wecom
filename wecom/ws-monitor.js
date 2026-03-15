@@ -1,9 +1,12 @@
 import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, URL } from "node:url";
 import { WSClient, generateReqId } from "@wecom/aibot-node-sdk";
+import { uploadAndSendMedia, buildMediaErrorSummary } from "./media-uploader.js";
+import { createPersistentReqIdStore } from "./reqid-store.js";
 import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js";
-import { prepareImageBufferForMsgItem } from "../image-processor.js";
 import { logger } from "../logger.js";
 import { normalizeThinkingTags } from "../think-parser.js";
 import { MessageDeduplicator } from "../utils.js";
@@ -35,6 +38,7 @@ import {
 import { setConfigProxyUrl } from "./http.js";
 import { checkDmPolicy } from "./dm-policy.js";
 import { checkGroupPolicy } from "./group-policy.js";
+import { fetchAndSaveMcpConfig } from "./mcp-config.js";
 import {
   clearAccountDisplaced,
   forecastActiveSendQuota,
@@ -62,17 +66,20 @@ import { ensureDynamicAgentListed } from "./workspace-template.js";
 const DEFAULT_AGENT_ID = "main";
 const DEFAULT_STATE_DIRNAME = ".openclaw";
 const LEGACY_STATE_DIRNAMES = [".clawdbot", ".moldbot", ".moltbot"];
-const MAX_REPLY_MSG_ITEMS = 10;
-const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
+const WAITING_MODEL_TICK_MS = 1_000;
 const REASONING_STREAM_THROTTLE_MS = 800;
 const VISIBLE_STREAM_THROTTLE_MS = 800;
 // Reserve headroom below the SDK's per-reqId queue limit (100) so the final
 // reply always has room.
 const MAX_INTERMEDIATE_STREAM_MESSAGES = 85;
+// WeCom stream messages expire if not updated within 6 minutes. Send a
+// keepalive update every 4 minutes to keep the stream alive during long runs.
+const STREAM_KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;
 // Match MEDIA:/FILE: directives at line start, optionally preceded by markdown list markers.
 const REPLY_MEDIA_DIRECTIVE_PATTERN = /^\s*(?:[-*•]\s+|\d+\.\s+)?(?:MEDIA|FILE)\s*:/im;
 const WECOM_REPLY_MEDIA_GUIDANCE_HEADER = "[WeCom reply media rule]";
 const inboundMessageDeduplicator = new MessageDeduplicator();
+const sessionReasoningInitLocks = new Map();
 
 function withTimeout(promise, timeoutMs, message) {
   if (!timeoutMs || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -120,6 +127,15 @@ function normalizeReasoningStreamText(text) {
   return lines.join("\n").trim();
 }
 
+function buildWaitingModelContent(seconds) {
+  const normalizedSeconds = Math.max(1, Number.parseInt(String(seconds ?? 1), 10) || 1);
+  const lines = [];
+  for (let current = 1; current <= normalizedSeconds; current += 1) {
+    lines.push(`等待模型响应 ${current}s`);
+  }
+  return `<think>${lines.join("\n")}`;
+}
+
 function buildWsStreamContent({ reasoningText = "", visibleText = "", finish = false }) {
   const normalizedReasoning = String(reasoningText ?? "").trim();
   const normalizedVisible = String(visibleText ?? "").trim();
@@ -134,6 +150,112 @@ function buildWsStreamContent({ reasoningText = "", visibleText = "", finish = f
     : `<think>${normalizedReasoning}`;
 
   return normalizedVisible ? `${thinkBlock}\n${normalizedVisible}` : thinkBlock;
+}
+
+function normalizeWecomCreateTimeMs(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return 0;
+  }
+  return Math.trunc(seconds * 1000);
+}
+
+function getWecomSourceTiming(createTime, now = Date.now()) {
+  const sourceCreateTimeMs = normalizeWecomCreateTimeMs(createTime);
+  if (!sourceCreateTimeMs) {
+    return {
+      sourceCreateTime: undefined,
+      sourceCreateTimeIso: undefined,
+      sourceToIngressMs: undefined,
+    };
+  }
+
+  return {
+    sourceCreateTime: createTime,
+    sourceCreateTimeIso: new Date(sourceCreateTimeMs).toISOString(),
+    sourceToIngressMs: Math.max(0, now - sourceCreateTimeMs),
+  };
+}
+
+function resolveWsKeepaliveContent({ reasoningText = "", visibleText = "", lastStreamText = "" }) {
+  const currentContent = buildWsStreamContent({
+    reasoningText,
+    visibleText,
+    finish: false,
+  });
+  return currentContent || String(lastStreamText ?? "").trim() || THINKING_MESSAGE;
+}
+
+function normalizeSessionStoreKey(sessionKey) {
+  return String(sessionKey ?? "").trim().toLowerCase();
+}
+
+async function withSessionReasoningInitLock(storePath, task) {
+  const lockKey = path.resolve(String(storePath ?? ""));
+  const previous = sessionReasoningInitLocks.get(lockKey) ?? Promise.resolve();
+  const current = previous.then(task, task);
+  sessionReasoningInitLocks.set(lockKey, current);
+  return await current.finally(() => {
+    if (sessionReasoningInitLocks.get(lockKey) === current) {
+      sessionReasoningInitLocks.delete(lockKey);
+    }
+  });
+}
+
+async function ensureDefaultSessionReasoningLevel({
+  core,
+  storePath,
+  sessionKey,
+  ctx,
+  reasoningLevel = "stream",
+  channelTag = "WS",
+}) {
+  const normalizedSessionKey = normalizeSessionStoreKey(sessionKey);
+  if (!storePath || !normalizedSessionKey || !ctx || !core?.session?.recordSessionMetaFromInbound) {
+    return null;
+  }
+
+  try {
+    const recorded = await core.session.recordSessionMetaFromInbound({
+      storePath,
+      sessionKey: normalizedSessionKey,
+      ctx,
+    });
+    if (!recorded || recorded.reasoningLevel != null) {
+      return recorded;
+    }
+
+    return await withSessionReasoningInitLock(storePath, async () => {
+      let store;
+      try {
+        store = JSON.parse(await readFile(storePath, "utf8"));
+      } catch (error) {
+        logger.warn(`[${channelTag}] Failed to read session store for reasoning default: ${error.message}`);
+        return recorded;
+      }
+
+      const resolvedKey = Object.keys(store).find((key) => normalizeSessionStoreKey(key) === normalizedSessionKey);
+      if (!resolvedKey) {
+        return recorded;
+      }
+
+      const existing = store[resolvedKey];
+      if (!existing || typeof existing !== "object" || existing.reasoningLevel != null) {
+        return existing ?? recorded;
+      }
+
+      store[resolvedKey] = { ...existing, reasoningLevel };
+      await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`);
+      logger.info(`[${channelTag}] Initialized session reasoningLevel default`, {
+        sessionKey: resolvedKey,
+        reasoningLevel,
+      });
+      return store[resolvedKey];
+    });
+  } catch (error) {
+    logger.warn(`[${channelTag}] Failed to initialize session reasoning default: ${error.message}`);
+    return null;
+  }
 }
 
 function createSdkLogger(accountId) {
@@ -164,19 +286,6 @@ function resolveChannelCore(runtime) {
   }
 
   throw new Error("OpenClaw channel runtime is unavailable");
-}
-
-function resolveMediaRuntime(runtime) {
-  const registeredRuntime = getRegisteredRuntimeOrNull();
-  const candidates = [runtime, registeredRuntime];
-
-  for (const candidate of candidates) {
-    if (typeof candidate?.media?.loadWebMedia === "function") {
-      return candidate;
-    }
-  }
-
-  throw new Error("OpenClaw media runtime is unavailable");
 }
 
 function resolveUserPath(value) {
@@ -280,15 +389,59 @@ function buildReplyMediaGuidance(config, agentId) {
   const browserMediaDir = path.join(resolveStateDir(), "media", "browser");
   return [
     WECOM_REPLY_MEDIA_GUIDANCE_HEADER,
-    `Only use FILE:/abs/path or MEDIA:/abs/path for files inside the current workspace: ${workspaceDir}`,
+    `Local reply files are allowed only under the current workspace: ${workspaceDir}`,
+    "Inside the agent sandbox, that same workspace is visible as /workspace.",
     `Browser-generated files are also allowed only under: ${browserMediaDir}`,
     "Never reference any other host path.",
-    "Do NOT call message.send with local file paths. The sandbox will block it.",
-    "Instead, in your final reply put each image on its own line as MEDIA:/abs/path",
-    "and each non-image file on its own line as FILE:/abs/path.",
+    "Do NOT call message.send or message.sendAttachment to deliver files back to the current WeCom chat/user; use MEDIA: or FILE: directives instead.",
+    "For images: put each image path on its own line as MEDIA:/abs/path.",
+    "If a local file is in the current sandbox workspace, use its /workspace/... path directly.",
+    "For every non-image file (PDF, MD, DOC, DOCX, XLS, XLSX, CSV, ZIP, MP4, TXT, etc.): put it on its own line as FILE:/abs/path.",
+    "Example: FILE:/workspace/skills/deep-research/SKILL.md",
+    "CRITICAL: Never use MEDIA: for non-image files. PDF must always use FILE:, never MEDIA:.",
+    "CRITICAL: If a tool already returned a path prefixed with FILE: (e.g. FILE:/abs/path.pdf), keep the FILE: prefix exactly as-is. Do NOT change it to MEDIA:.",
     "Each directive MUST be on its own line with no other text on that line.",
     "The plugin will automatically send the media to the user.",
   ].join("\n");
+}
+
+function normalizeReplyMediaUrlForLoad(mediaUrl, config, agentId) {
+  let normalized = String(mediaUrl ?? "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (/^file:\/\//i.test(normalized)) {
+    try {
+      const parsed = new URL(normalized);
+      if (parsed.protocol === "file:") {
+        normalized = fileURLToPath(parsed);
+      }
+    } catch {
+      return normalized;
+    }
+  }
+
+  if (/^sandbox:\/{0,2}/i.test(normalized)) {
+    normalized = normalized.replace(/^sandbox:\/{0,2}/i, "/");
+  }
+
+  if (normalized === "/workspace" || normalized.startsWith("/workspace/")) {
+    const workspaceDir = resolveAgentWorkspaceDir(config, agentId || resolveDefaultAgentId(config));
+    const rel = normalized === "/workspace" ? "" : normalized.slice("/workspace/".length);
+    const resolved = rel
+      ? path.resolve(workspaceDir, ...rel.split("/").filter(Boolean))
+      : path.resolve(workspaceDir);
+    // Prevent path traversal outside workspace directory
+    const normalizedWorkspace = path.resolve(workspaceDir) + path.sep;
+    if (resolved !== path.resolve(workspaceDir) && !resolved.startsWith(normalizedWorkspace)) {
+      logger.warn(`[WS] Blocked path traversal attempt: ${mediaUrl} resolved to ${resolved}`);
+      return "";
+    }
+    return resolved;
+  }
+
+  return normalized;
 }
 
 function buildBodyForAgent(body, config, agentId) {
@@ -357,200 +510,87 @@ function applyAccountNetworkConfig(account) {
   setApiBaseUrl(network.apiBaseUrl ?? "");
 }
 
-function resolveReplyMediaFilename(mediaUrl, loaded) {
-  const candidateNames = [
-    loaded?.fileName,
-    loaded?.filename,
-    loaded?.name,
-    typeof loaded?.path === "string" ? path.basename(loaded.path) : "",
-  ];
-
-  for (const candidate of candidateNames) {
-    const normalized = String(candidate ?? "").trim();
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  const normalizedUrl = String(mediaUrl ?? "").trim();
-  if (!normalizedUrl) {
-    return "attachment";
-  }
-
-  if (normalizedUrl.startsWith("/")) {
-    return path.basename(normalizedUrl) || "attachment";
-  }
-
-  try {
-    return path.basename(new URL(normalizedUrl).pathname) || "attachment";
-  } catch {
-    return path.basename(normalizedUrl) || "attachment";
-  }
+function stripThinkTags(text) {
+  return String(text ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }
 
-function resolveReplyMediaAgentType(mediaUrl, loaded) {
-  const contentType = String(loaded?.contentType ?? "").toLowerCase();
-  if (loaded?.kind === "image" || contentType.startsWith("image/")) {
-    return "image";
-  }
-  const filename = resolveReplyMediaFilename(mediaUrl, loaded).toLowerCase();
-  if (/\.(jpg|jpeg|png|gif|bmp|webp)$/.test(filename)) {
-    return "image";
-  }
-  return "file";
-}
+async function sendMediaBatch({ wsClient, frame, state, account, runtime, config, agentId }) {
+  const body = frame?.body ?? {};
+  const chatId = body.chatid || body.from?.userid;
+  const mediaLocalRoots = resolveReplyMediaLocalRoots(config, agentId);
 
-async function prepareReplyMediaOutputs({ payload, runtime, config, agentId, mirrorImagesToAgent = false }) {
-  const mediaUrls = resolveReplyMediaUrls(payload);
-  if (mediaUrls.length === 0) {
-    return { msgItems: [], agentMedia: [], mirroredAgentMedia: [] };
-  }
-
-  let mediaRuntime;
-  try {
-    mediaRuntime = resolveMediaRuntime(runtime);
-  } catch (error) {
-    logger.error(`[WS] Reply media runtime is unavailable: ${error.message}`);
-    return { msgItems: [], agentMedia: [], mirroredAgentMedia: [] };
-  }
-
-  const localRoots = resolveReplyMediaLocalRoots(config, agentId);
-  const msgItems = [];
-  const agentMedia = [];
-  const mirroredAgentMedia = [];
-
-  for (const mediaUrl of mediaUrls) {
-    try {
-      const loaded = await mediaRuntime.media.loadWebMedia(mediaUrl, {
-        maxBytes: MAX_REPLY_IMAGE_BYTES,
-        localRoots,
+  for (const mediaUrl of state.pendingMediaUrls) {
+    const normalizedUrl = normalizeReplyMediaUrlForLoad(mediaUrl, config, agentId);
+    if (!normalizedUrl) {
+      state.hasMediaFailed = true;
+      logger.error(`[WS] Media send failed: url=${mediaUrl}, reason=invalid_local_path`);
+      const summary = buildMediaErrorSummary(mediaUrl, {
+        ok: false,
+        rejectReason: "invalid_local_path",
+        error: "reply media path resolved outside allowed roots",
       });
-      const mediaType = resolveReplyMediaAgentType(mediaUrl, loaded);
+      state.mediaErrorSummary = state.mediaErrorSummary
+        ? `${state.mediaErrorSummary}\n\n${summary}`
+        : summary;
+      continue;
+    }
+    const result = await uploadAndSendMedia({
+      wsClient,
+      mediaUrl: normalizedUrl,
+      chatId,
+      mediaLocalRoots,
+      includeDefaultMediaLocalRoots: false,
+      log: (...args) => logger.info(...args),
+      errorLog: (...args) => logger.error(...args),
+    });
 
-      if (mediaType === "image") {
-        if (msgItems.length >= MAX_REPLY_MSG_ITEMS) {
-          logger.warn(`[WS] Reply contains more than ${MAX_REPLY_MSG_ITEMS} images; extra images were skipped`);
-          continue;
-        }
-        const image = prepareImageBufferForMsgItem(loaded.buffer);
-        msgItems.push({
-          msgtype: "image",
-          image: {
-            base64: image.base64,
-            md5: image.md5,
-          },
-        });
-        if (mirrorImagesToAgent) {
-          mirroredAgentMedia.push({
-            mediaUrl,
-            mediaType,
-            buffer: loaded.buffer,
-            filename: resolveReplyMediaFilename(mediaUrl, loaded),
-          });
-        }
-        continue;
+    if (result.ok) {
+      state.hasMedia = true;
+      if (result.downgraded) {
+        logger.info(`[WS] Media downgraded: ${result.downgradeNote}`);
       }
-
-      agentMedia.push({
-        mediaUrl,
-        mediaType,
-        buffer: loaded.buffer,
-        filename: resolveReplyMediaFilename(mediaUrl, loaded),
-      });
-    } catch (error) {
-      logger.error(`[WS] Failed to prepare reply media ${mediaUrl}: ${error.message}`);
+    } else {
+      state.hasMediaFailed = true;
+      logger.error(`[WS] Media send failed: url=${mediaUrl}, reason=${result.rejectReason || result.error}`);
+      const summary = buildMediaErrorSummary(mediaUrl, result);
+      state.mediaErrorSummary = state.mediaErrorSummary
+        ? `${state.mediaErrorSummary}\n\n${summary}`
+        : summary;
     }
   }
-
-  return { msgItems, agentMedia, mirroredAgentMedia };
+  state.pendingMediaUrls = [];
 }
 
-function buildPassiveMediaAgentTarget({ senderId, chatId, isGroupChat }) {
-  return isGroupChat ? { chatId } : { toUser: senderId };
-}
+async function finishThinkingStream({ wsClient, frame, state, accountId }) {
+  const visibleText = stripThinkTags(state.accumulatedText);
+  let finishText;
 
-function buildPassiveMediaNotice(mediaType, { deliveredViaAgent = true } = {}) {
-  if (mediaType === "file") {
-    return deliveredViaAgent
-      ? "由于当前企业微信bot不支持给用户发送文件，文件通过自建应用发送。"
-      : "由于当前企业微信bot不支持给用户发送文件，且当前未配置自建应用发送渠道。";
-  }
-  if (mediaType === "image") {
-    return deliveredViaAgent
-      ? "由于当前企业微信bot不支持直接发送图片，图片通过自建应用发送。"
-      : "由于当前企业微信bot不支持直接发送图片，且当前未配置自建应用发送渠道。";
-  }
-  return deliveredViaAgent
-    ? "由于当前企业微信bot不支持直接发送媒体，媒体通过自建应用发送。"
-    : "由于当前企业微信bot不支持直接发送媒体，且当前未配置自建应用发送渠道。";
-}
-
-function buildPassiveMediaNoticeBlock(mediaEntries, { deliveredViaAgent = true } = {}) {
-  if (!Array.isArray(mediaEntries) || mediaEntries.length === 0) {
-    return "";
-  }
-
-  const mediaTypes = [...new Set(mediaEntries.map((entry) => entry.mediaType).filter(Boolean))];
-  return mediaTypes
-    .map((mediaType) => buildPassiveMediaNotice(mediaType, { deliveredViaAgent }))
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-async function deliverPassiveAgentMedia({
-  account,
-  senderId,
-  chatId,
-  isGroupChat,
-  text,
-  includeText = false,
-  includeNotice = true,
-  mediaEntries,
-}) {
-  if (!Array.isArray(mediaEntries) || mediaEntries.length === 0) {
-    return;
-  }
-
-  if (!account?.agentCredentials) {
-    logger.warn("[WS] Agent API is not configured; skipped passive non-image media delivery");
-    return;
-  }
-
-  applyAccountNetworkConfig(account);
-
-  const target = buildPassiveMediaAgentTarget({ senderId, chatId, isGroupChat });
-  const noticeParts = [];
-  if (includeText && text) {
-    noticeParts.push(text);
-  }
-  if (includeNotice) {
-    const noticeText = buildPassiveMediaNoticeBlock(mediaEntries);
-    if (noticeText) {
-      noticeParts.push(noticeText);
+  if (visibleText) {
+    let finalVisibleText = state.accumulatedText;
+    if (state.hasMediaFailed && state.mediaErrorSummary) {
+      finalVisibleText += `\n\n${state.mediaErrorSummary}`;
     }
-  }
-  if (noticeParts.length > 0) {
-    await agentSendText({
-      agent: account.agentCredentials,
-      ...target,
-      text: noticeParts.join("\n\n"),
+    finishText = buildWsStreamContent({
+      reasoningText: state.reasoningText,
+      visibleText: finalVisibleText,
+      finish: true,
     });
+  } else if (state.hasMedia) {
+    finishText = "文件已发送，请查收。";
+  } else if (state.hasMediaFailed && state.mediaErrorSummary) {
+    finishText = state.mediaErrorSummary;
+  } else {
+    finishText = "处理完成。";
   }
 
-  for (const entry of mediaEntries) {
-    const mediaId = await agentUploadMedia({
-      agent: account.agentCredentials,
-      type: entry.mediaType,
-      buffer: entry.buffer,
-      filename: entry.filename,
-    });
-    await agentSendMedia({
-      agent: account.agentCredentials,
-      ...target,
-      mediaId,
-      mediaType: entry.mediaType,
-    });
-  }
+  await sendWsReply({
+    wsClient,
+    frame,
+    streamId: state.streamId,
+    text: finishText,
+    finish: true,
+    accountId,
+  });
 }
 
 function resolveWelcomeMessage(account) {
@@ -814,13 +854,13 @@ async function flushPendingRepliesViaAgentApi(account) {
   }
 }
 
-async function sendThinkingReply({ wsClient, frame, streamId }) {
+async function sendThinkingReply({ wsClient, frame, streamId, text = THINKING_MESSAGE }) {
   try {
     await sendWsReply({
       wsClient,
       frame,
       streamId,
-      text: THINKING_MESSAGE,
+      text,
       finish: false,
     });
   } catch (error) {
@@ -878,6 +918,7 @@ function buildInboundContext({
     SenderName: senderId,
     GroupId: isGroupChat ? chatId : undefined,
     Timestamp: Date.now(),
+    SourceTimestamp: normalizeWecomCreateTimeMs(body?.create_time) || undefined,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
@@ -904,7 +945,7 @@ function buildInboundContext({
   return { ctxPayload: core.reply.finalizeInboundContext(context), storePath };
 }
 
-async function processWsMessage({ frame, account, config, runtime, wsClient }) {
+async function processWsMessage({ frame, account, config, runtime, wsClient, reqIdStore }) {
   const core = resolveChannelCore(runtime);
   const body = frame?.body ?? {};
   const senderId = body?.from?.userid;
@@ -933,6 +974,27 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
     return;
   }
 
+  const perfStartedAt = Date.now();
+  const sourceTiming = getWecomSourceTiming(body?.create_time, perfStartedAt);
+  const perfState = {
+    firstReasoningReceivedAt: 0,
+    firstReasoningForwardedAt: 0,
+    firstVisibleReceivedAt: 0,
+    firstVisibleForwardedAt: 0,
+    thinkingSentAt: 0,
+    finalReplySentAt: 0,
+  };
+  const logPerf = (stage, extra = {}) => {
+    logger.info(`[WSPERF:${account.accountId}] ${stage}`, {
+      messageId,
+      senderId,
+      chatId,
+      isGroupChat,
+      elapsedMs: Date.now() - perfStartedAt,
+      ...extra,
+    });
+  };
+
   recordInboundMessage({ accountId: account.accountId, chatId });
 
   const { textParts, imageUrls, imageAesKeys, fileUrls, fileAesKeys, quoteContent } = parseMessageContent(body);
@@ -944,11 +1006,13 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
     chatId,
     isGroupChat,
     messageId,
+    ...sourceTiming,
     textLength: originalText.length,
     imageCount: imageUrls.length,
     fileCount: fileUrls.length,
     preview: originalText.slice(0, 80) || (imageUrls.length ? "[image]" : fileUrls.length ? "[file]" : ""),
   });
+  logPerf("inbound", sourceTiming);
 
   if (!text && quoteContent) {
     text = quoteContent;
@@ -1048,9 +1112,24 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
     }),
   ]);
   const mediaList = [...imageMediaList, ...fileMediaList];
+  logPerf("media_ready", {
+    imageCount: imageMediaList.length,
+    fileCount: fileMediaList.length,
+  });
 
-  const streamId = generateReqId("stream");
-  const state = { accumulatedText: "", reasoningText: "", streamId, replyMediaUrls: [] };
+  const streamId = reqIdStore?.getSync(chatId) ?? generateReqId("stream");
+  if (reqIdStore) reqIdStore.set(chatId, streamId);
+  const state = {
+    accumulatedText: "",
+    reasoningText: "",
+    streamId,
+    replyMediaUrls: [],
+    pendingMediaUrls: [],
+    hasMedia: false,
+    hasMediaFailed: false,
+    mediaErrorSummary: "",
+    deliverCalled: false,
+  };
   setMessageState(messageId, state);
 
   // Throttle reasoning and visible text stream updates to avoid exceeding
@@ -1060,26 +1139,95 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   let pendingReasoningTimer = null;
   let lastVisibleSendAt = 0;
   let pendingVisibleTimer = null;
+  let lastStreamSentAt = 0;
+  let lastNonEmptyStreamText = "";
+  let lastForwardedVisibleText = "";
+  let keepaliveTimer = null;
+  let waitingModelTimer = null;
+  let waitingModelSeconds = 0;
+  let waitingModelActive = false;
 
   const canSendIntermediate = () => streamMessagesSent < MAX_INTERMEDIATE_STREAM_MESSAGES;
 
-  const sendReasoningUpdate = async () => {
-    if (!canSendIntermediate()) return;
-    lastReasoningSendAt = Date.now();
+  const stopWaitingModelUpdates = () => {
+    waitingModelActive = false;
+    if (waitingModelTimer) {
+      clearTimeout(waitingModelTimer);
+      waitingModelTimer = null;
+    }
+  };
+
+  const sendWaitingModelUpdate = async (seconds) => {
+    const waitingText = buildWaitingModelContent(seconds);
+    lastStreamSentAt = Date.now();
+    lastNonEmptyStreamText = waitingText;
     try {
       streamMessagesSent++;
       await sendWsReply({
         wsClient,
         frame,
         streamId: state.streamId,
-        text: buildWsStreamContent({
-          reasoningText: state.reasoningText,
-          visibleText: state.accumulatedText,
-          finish: false,
-        }),
+        text: waitingText,
         finish: false,
         accountId: account.accountId,
       });
+      logPerf("waiting_model_forwarded", {
+        seconds,
+        streamMessagesSent,
+        chars: waitingText.length,
+      });
+    } catch (error) {
+      logger.warn(`[WS] Waiting-model stream send failed (non-fatal): ${error.message}`);
+    }
+  };
+
+  const scheduleWaitingModelUpdate = () => {
+    if (!waitingModelActive) {
+      return;
+    }
+    if (waitingModelTimer) {
+      clearTimeout(waitingModelTimer);
+    }
+    waitingModelTimer = setTimeout(async () => {
+      waitingModelTimer = null;
+      if (!waitingModelActive || !canSendIntermediate()) {
+        return;
+      }
+      waitingModelSeconds += 1;
+      await sendWaitingModelUpdate(waitingModelSeconds);
+      scheduleWaitingModelUpdate();
+    }, WAITING_MODEL_TICK_MS);
+  };
+
+  const sendReasoningUpdate = async () => {
+    if (!canSendIntermediate()) return;
+    lastReasoningSendAt = Date.now();
+    lastStreamSentAt = lastReasoningSendAt;
+    const streamText = buildWsStreamContent({
+      reasoningText: state.reasoningText,
+      visibleText: state.accumulatedText,
+      finish: false,
+    });
+    if (streamText) {
+      lastNonEmptyStreamText = streamText;
+    }
+    try {
+      streamMessagesSent++;
+      await sendWsReply({
+        wsClient,
+        frame,
+        streamId: state.streamId,
+        text: streamText,
+        finish: false,
+        accountId: account.accountId,
+      });
+      if (!perfState.firstReasoningForwardedAt) {
+        perfState.firstReasoningForwardedAt = Date.now();
+        logPerf("first_reasoning_forwarded", {
+          streamMessagesSent,
+          chars: streamText.length,
+        });
+      }
     } catch (error) {
       logger.warn(`[WS] Reasoning stream send failed (non-fatal): ${error.message}`);
     }
@@ -1088,23 +1236,159 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   const sendVisibleUpdate = async () => {
     if (!canSendIntermediate()) return;
     lastVisibleSendAt = Date.now();
+    lastStreamSentAt = lastVisibleSendAt;
+    const visibleText = state.accumulatedText;
+    const streamText = buildWsStreamContent({
+      reasoningText: state.reasoningText,
+      visibleText,
+      finish: false,
+    });
+    if (streamText) {
+      lastNonEmptyStreamText = streamText;
+    }
+    lastForwardedVisibleText = visibleText;
     try {
       streamMessagesSent++;
       await sendWsReply({
         wsClient,
         frame,
         streamId: state.streamId,
-        text: buildWsStreamContent({
-          reasoningText: state.reasoningText,
-          visibleText: state.accumulatedText,
-          finish: false,
-        }),
+        text: streamText,
         finish: false,
         accountId: account.accountId,
       });
+      if (!perfState.firstVisibleForwardedAt) {
+        perfState.firstVisibleForwardedAt = Date.now();
+        logPerf("first_visible_forwarded", {
+          streamMessagesSent,
+          chars: streamText.length,
+        });
+      }
     } catch (error) {
       logger.warn(`[WS] Visible stream send failed (non-fatal): ${error.message}`);
     }
+  };
+
+  const flushPendingStreamUpdates = async () => {
+    const hadPendingReasoning = Boolean(pendingReasoningTimer);
+    const hadPendingVisible = Boolean(pendingVisibleTimer);
+
+    if (pendingReasoningTimer) {
+      clearTimeout(pendingReasoningTimer);
+      pendingReasoningTimer = null;
+    }
+    if (pendingVisibleTimer) {
+      clearTimeout(pendingVisibleTimer);
+      pendingVisibleTimer = null;
+    }
+
+    if (hadPendingReasoning) {
+      const visibleText = hadPendingVisible ? state.accumulatedText : lastForwardedVisibleText;
+      const streamText = buildWsStreamContent({
+        reasoningText: state.reasoningText,
+        visibleText,
+        finish: false,
+      });
+      if (!streamText || streamText === lastNonEmptyStreamText) {
+        return;
+      }
+      lastReasoningSendAt = Date.now();
+      lastStreamSentAt = lastReasoningSendAt;
+      lastNonEmptyStreamText = streamText;
+      if (hadPendingVisible) {
+        lastForwardedVisibleText = visibleText;
+      }
+      try {
+        streamMessagesSent++;
+        await sendWsReply({
+          wsClient,
+          frame,
+          streamId: state.streamId,
+          text: streamText,
+          finish: false,
+          accountId: account.accountId,
+        });
+        if (!perfState.firstReasoningForwardedAt) {
+          perfState.firstReasoningForwardedAt = Date.now();
+          logPerf("first_reasoning_forwarded", {
+            streamMessagesSent,
+            chars: streamText.length,
+          });
+        }
+      } catch (error) {
+        logger.warn(`[WS] Reasoning stream send failed (non-fatal): ${error.message}`);
+      }
+      return;
+    }
+    if (hadPendingVisible) {
+      await sendVisibleUpdate();
+    }
+  };
+
+  const scheduleKeepalive = () => {
+    if (keepaliveTimer) clearTimeout(keepaliveTimer);
+    keepaliveTimer = setTimeout(async () => {
+      keepaliveTimer = null;
+      if (!canSendIntermediate()) return;
+      const idle = Date.now() - lastStreamSentAt;
+      if (idle < STREAM_KEEPALIVE_INTERVAL_MS) {
+        // A real update was sent recently; wait remaining time then send immediately.
+        const remaining = STREAM_KEEPALIVE_INTERVAL_MS - idle;
+        keepaliveTimer = setTimeout(async () => {
+          keepaliveTimer = null;
+          if (!canSendIntermediate()) return;
+          logger.debug(`[WS] Sending stream keepalive after deferred wait (idle ${Math.round((Date.now() - lastStreamSentAt) / 1000)}s)`);
+          lastStreamSentAt = Date.now();
+          const keepaliveText = resolveWsKeepaliveContent({
+            reasoningText: state.reasoningText,
+            visibleText: state.accumulatedText,
+            lastStreamText: lastNonEmptyStreamText,
+          });
+          if (keepaliveText) {
+            lastNonEmptyStreamText = keepaliveText;
+          }
+          try {
+            streamMessagesSent++;
+            await sendWsReply({
+              wsClient,
+              frame,
+              streamId: state.streamId,
+              text: keepaliveText,
+              finish: false,
+              accountId: account.accountId,
+            });
+          } catch (err) {
+            logger.warn(`[WS] Keepalive send failed (non-fatal): ${err.message}`);
+          }
+          scheduleKeepalive();
+        }, remaining);
+        return;
+      }
+      logger.debug(`[WS] Sending stream keepalive (idle ${Math.round(idle / 1000)}s)`);
+      lastStreamSentAt = Date.now();
+      const keepaliveText = resolveWsKeepaliveContent({
+        reasoningText: state.reasoningText,
+        visibleText: state.accumulatedText,
+        lastStreamText: lastNonEmptyStreamText,
+      });
+      if (keepaliveText) {
+        lastNonEmptyStreamText = keepaliveText;
+      }
+      try {
+        streamMessagesSent++;
+        await sendWsReply({
+          wsClient,
+          frame,
+          streamId: state.streamId,
+          text: keepaliveText,
+          finish: false,
+          accountId: account.accountId,
+        });
+      } catch (error) {
+        logger.warn(`[WS] Stream keepalive send failed (non-fatal): ${error.message}`);
+      }
+      scheduleKeepalive();
+    }, STREAM_KEEPALIVE_INTERVAL_MS);
   };
 
   const cancelPendingTimers = () => {
@@ -1116,6 +1400,11 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
       clearTimeout(pendingVisibleTimer);
       pendingVisibleTimer = null;
     }
+    if (keepaliveTimer) {
+      clearTimeout(keepaliveTimer);
+      keepaliveTimer = null;
+    }
+    stopWaitingModelUpdates();
   };
 
   const cleanupState = () => {
@@ -1124,8 +1413,21 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   };
 
   if (account.sendThinkingMessage !== false) {
-    await sendThinkingReply({ wsClient, frame, streamId });
+    waitingModelActive = true;
+    waitingModelSeconds = 1;
+    await sendThinkingReply({
+      wsClient,
+      frame,
+      streamId,
+      text: buildWaitingModelContent(waitingModelSeconds),
+    });
+    lastNonEmptyStreamText = buildWaitingModelContent(waitingModelSeconds);
+    perfState.thinkingSentAt = Date.now();
+    logPerf("thinking_sent", { streamId });
+    scheduleWaitingModelUpdate();
   }
+  lastStreamSentAt = Date.now();
+  scheduleKeepalive();
 
   const peerKind = isGroupChat ? "group" : "dm";
   const peerId = isGroupChat ? chatId : senderId;
@@ -1173,13 +1475,13 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   });
   ctxPayload.CommandAuthorized = commandAuthorized;
 
-  void core.session
-    .recordSessionMetaFromInbound({
-      storePath,
-      sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
-      ctx: ctxPayload,
-    })
-    .catch((error) => logger.error(`[WS] Failed to record session metadata: ${error.message}`));
+  await ensureDefaultSessionReasoningLevel({
+    core,
+    storePath,
+    sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
+    ctx: ctxPayload,
+    channelTag: "WS",
+  });
 
   const runDispatch = async () => {
     let cleanedUp = false;
@@ -1192,6 +1494,12 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
     };
 
     try {
+      logPerf("dispatch_start", {
+        routeAgentId: route.agentId,
+        sessionKey: route.sessionKey,
+        mediaCount: mediaList.length,
+        ...sourceTiming,
+      });
       await streamContext.run(
         { streamId, streamKey: peerId, agentId: route.agentId, accountId: account.accountId },
         async () => {
@@ -1205,7 +1513,14 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
                 if (!nextReasoning) {
                   return;
                 }
+                stopWaitingModelUpdates();
                 state.reasoningText = nextReasoning;
+                if (!perfState.firstReasoningReceivedAt) {
+                  perfState.firstReasoningReceivedAt = Date.now();
+                  logPerf("first_reasoning_received", {
+                    chars: nextReasoning.length,
+                  });
+                }
 
                 // Throttle: skip if sent recently, schedule a trailing update instead.
                 const elapsed = Date.now() - lastReasoningSendAt;
@@ -1223,30 +1538,62 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
             },
             dispatcherOptions: {
               deliver: async (payload, info) => {
+                state.deliverCalled = true;
                 const normalized = normalizeReplyPayload(payload);
                 const chunk = normalized.text;
                 const mediaUrls = normalized.mediaUrls;
+
+                if (chunk) {
+                  stopWaitingModelUpdates();
+                  state.accumulatedText += chunk;
+                }
+
                 for (const mediaUrl of mediaUrls) {
                   if (!state.replyMediaUrls.includes(mediaUrl)) {
                     state.replyMediaUrls.push(mediaUrl);
+                    state.pendingMediaUrls.push(mediaUrl);
                   }
                 }
 
-                state.accumulatedText += chunk;
-                if (info.kind !== "final") {
-                  // Throttle visible text stream updates to avoid exceeding
-                  // the SDK queue limit together with reasoning updates.
-                  const elapsed = Date.now() - lastVisibleSendAt;
-                  if (elapsed < VISIBLE_STREAM_THROTTLE_MS) {
-                    if (!pendingVisibleTimer) {
-                      pendingVisibleTimer = setTimeout(async () => {
-                        pendingVisibleTimer = null;
-                        await sendVisibleUpdate();
-                      }, VISIBLE_STREAM_THROTTLE_MS - elapsed);
-                    }
-                    return;
+                if (state.pendingMediaUrls.length > 0) {
+                  try {
+                    await sendMediaBatch({
+                      wsClient, frame, state, account, runtime, config,
+                      agentId: route.agentId,
+                    });
+                  } catch (mediaErr) {
+                    state.hasMediaFailed = true;
+                    const errMsg = String(mediaErr);
+                    const summary = `文件发送失败：内部处理异常，请升级 openclaw 到最新版本后重试。\n错误详情：${errMsg}`;
+                    state.mediaErrorSummary = state.mediaErrorSummary
+                      ? `${state.mediaErrorSummary}\n\n${summary}`
+                      : summary;
+                    logger.error(`[WS] sendMediaBatch threw: ${errMsg}`);
                   }
-                  await sendVisibleUpdate();
+                }
+
+                if (!perfState.firstVisibleReceivedAt && chunk?.trim()) {
+                  perfState.firstVisibleReceivedAt = Date.now();
+                  logPerf("first_visible_received", {
+                    chars: chunk.length,
+                  });
+                }
+
+                if (info.kind !== "final") {
+                  const hasText = stripThinkTags(state.accumulatedText);
+                  if (hasText) {
+                    const elapsed = Date.now() - lastVisibleSendAt;
+                    if (elapsed < VISIBLE_STREAM_THROTTLE_MS) {
+                      if (!pendingVisibleTimer) {
+                        pendingVisibleTimer = setTimeout(async () => {
+                          pendingVisibleTimer = null;
+                          await sendVisibleUpdate();
+                        }, VISIBLE_STREAM_THROTTLE_MS - elapsed);
+                      }
+                      return;
+                    }
+                    await sendVisibleUpdate();
+                  }
                 }
               },
               onError: (error, info) => {
@@ -1257,112 +1604,67 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
         },
       );
 
+      // Flush the latest throttled snapshot before finish=true so reasoning
+      // and visible deltas are not collapsed away by the final frame.
+      await flushPendingStreamUpdates();
+
       // Cancel pending throttled timers before the final reply to prevent
       // non-final updates from being sent after finish=true.
       cancelPendingTimers();
 
-      const preparedReplyMedia = await prepareReplyMediaOutputs({
-        payload: { mediaUrls: state.replyMediaUrls },
-        runtime,
-        config,
-        agentId: route.agentId,
-        mirrorImagesToAgent: Boolean(account?.agentCredentials),
-      });
-      const msgItem = preparedReplyMedia.msgItems;
-      const deferredMediaDeliveredViaAgent = Boolean(account?.agentCredentials);
-      const finalReplyText = buildWsStreamContent({
-        reasoningText: state.reasoningText,
-        visibleText: state.accumulatedText,
-        finish: true,
-      });
-      const passiveMediaNotice = buildPassiveMediaNoticeBlock(preparedReplyMedia.agentMedia, {
-        deliveredViaAgent: deferredMediaDeliveredViaAgent,
-      });
-      const finalWsText = [finalReplyText, passiveMediaNotice].filter(Boolean).join("\n\n");
-
-      if (preparedReplyMedia.agentMedia.length > 0 && !account?.agentCredentials) {
-        logger.warn("[WS] Agent API is not configured; passive non-image media delivery was skipped");
-      }
-
-      // If dispatch returned no content at all (e.g. upstream empty_stream),
-      // send a fallback so the user isn't left waiting in silence.
-      const effectiveFinalText = finalWsText || (msgItem.length === 0 ? "模型暂时无法响应，请稍后重试。" : "");
-      if (effectiveFinalText || msgItem.length > 0) {
-        logger.info("[WS] Sending passive final reply", {
+      try {
+        await finishThinkingStream({
+          wsClient,
+          frame,
+          state,
           accountId: account.accountId,
-          agentId: route.agentId,
-          streamId: state.streamId,
-          textLength: effectiveFinalText.length,
-          imageItemCount: msgItem.length,
-          deferredAgentMediaCount: preparedReplyMedia.agentMedia.length,
-          mirroredAgentImageCount: preparedReplyMedia.mirroredAgentMedia.length,
-          emptyStreamFallback: !finalWsText,
         });
-        try {
-          await sendWsReply({
-            wsClient,
-            frame,
-            streamId: state.streamId,
-            text: effectiveFinalText,
-            finish: true,
-            msgItem,
-            accountId: account.accountId,
-          });
-        } catch (sendError) {
-          // WS disconnected or timed out — enqueue for retry via Agent API on reconnect.
-          logger.warn(`[WS] Final reply send failed, enqueuing for retry: ${sendError.message}`, {
-            accountId: account.accountId,
-            chatId,
-            senderId,
-          });
+        perfState.finalReplySentAt = Date.now();
+        logPerf("final_reply_sent", {
+          textLength: state.accumulatedText.length,
+          hasMedia: state.hasMedia,
+          hasMediaFailed: state.hasMediaFailed,
+        });
+      } catch (sendError) {
+        logger.warn(`[WS] Final reply send failed, enqueuing for retry: ${sendError.message}`, {
+          accountId: account.accountId,
+          chatId,
+          senderId,
+        });
+        if (state.accumulatedText) {
           enqueuePendingReply(account.accountId, {
-            text: effectiveFinalText,
+            text: state.accumulatedText,
             senderId,
             chatId,
             isGroupChat,
           });
         }
       }
-
-      if (account?.agentCredentials && preparedReplyMedia.mirroredAgentMedia.length > 0) {
-        await deliverPassiveAgentMedia({
-          account,
-          senderId,
-          chatId,
-          isGroupChat,
-          text: state.accumulatedText,
-          includeText: false,
-          includeNotice: false,
-          mediaEntries: preparedReplyMedia.mirroredAgentMedia,
-        });
-      }
-
-      if (account?.agentCredentials && preparedReplyMedia.agentMedia.length > 0) {
-        await deliverPassiveAgentMedia({
-          account,
-          senderId,
-          chatId,
-          isGroupChat,
-          text: finalWsText,
-          includeText: false,
-          includeNotice: false,
-          mediaEntries: preparedReplyMedia.agentMedia,
-        });
-      }
       safeCleanup();
+      logPerf("dispatch_complete", {
+        hadReasoning: Boolean(perfState.firstReasoningReceivedAt),
+        hadVisibleText: Boolean(perfState.firstVisibleReceivedAt),
+        totalOutputChars: state.accumulatedText.length,
+        replyMediaCount: state.replyMediaUrls.length,
+      });
     } catch (error) {
       logger.error(`[WS] Failed to dispatch reply: ${error.message}`);
+      logPerf("dispatch_failed", {
+        error: error.message,
+      });
       try {
-        await sendWsReply({
+        // Ensure the user sees an error message, not "处理完成。"
+        if (!stripThinkTags(state.accumulatedText) && !state.hasMedia) {
+          state.accumulatedText = `⚠️ 处理出错：${error.message}`;
+        }
+        await finishThinkingStream({
           wsClient,
           frame,
-          streamId: state.streamId,
-          text: "处理消息时出错，请稍后再试。",
-          finish: true,
+          state,
           accountId: account.accountId,
         });
-      } catch (retryError) {
-        // If the error reply also fails (WS disconnected), enqueue accumulated text if any.
+      } catch (finishErr) {
+        logger.error(`[WS] Failed to finish thinking stream after dispatch error: ${finishErr.message}`);
         if (state.accumulatedText) {
           enqueuePendingReply(account.accountId, {
             text: state.accumulatedText,
@@ -1377,8 +1679,24 @@ async function processWsMessage({ frame, account, config, runtime, wsClient }) {
   };
 
   const lockKey = `${account.accountId}:${peerId}`;
+  const queuedAt = Date.now();
   const previous = dispatchLocks.get(lockKey) ?? Promise.resolve();
-  const current = previous.then(runDispatch, runDispatch);
+  const current = previous.then(
+    async () => {
+      const queueWaitMs = Date.now() - queuedAt;
+      if (queueWaitMs >= 50) {
+        logPerf("dispatch_lock_acquired", { queueWaitMs });
+      }
+      return await runDispatch();
+    },
+    async () => {
+      const queueWaitMs = Date.now() - queuedAt;
+      if (queueWaitMs >= 50) {
+        logPerf("dispatch_lock_acquired", { queueWaitMs, previousFailed: true });
+      }
+      return await runDispatch();
+    },
+  );
   dispatchLocks.set(lockKey, current);
   current.finally(() => {
     if (dispatchLocks.get(lockKey) === current) {
@@ -1412,10 +1730,19 @@ export async function startWsMonitor({ account, config, runtime, abortSignal, ws
           maxReconnectAttempts: WS_MAX_RECONNECT_ATTEMPTS,
         });
 
+  const reqIdStore = createPersistentReqIdStore(account.accountId);
+  await reqIdStore.warmup();
+
   return new Promise((resolve, reject) => {
     let settled = false;
 
     const cleanup = async () => {
+      try {
+        await reqIdStore.flush();
+      } catch (flushErr) {
+        logger.warn(`[WS:${account.accountId}] Failed to flush reqId store on cleanup: ${flushErr.message}`);
+      }
+      reqIdStore.destroy();
       await cleanupWsAccount(account.accountId);
     };
 
@@ -1457,6 +1784,8 @@ export async function startWsMonitor({ account, config, runtime, abortSignal, ws
       clearAccountDisplaced(account.accountId);
       setWsClient(account.accountId, wsClient);
 
+      void fetchAndSaveMcpConfig(wsClient, account.accountId, runtime);
+
       // Drain pending replies that failed due to prior WS disconnection.
       if (account?.agentCredentials && hasPendingReplies(account.accountId)) {
         void flushPendingRepliesViaAgentApi(account).catch((flushError) => {
@@ -1483,7 +1812,7 @@ export async function startWsMonitor({ account, config, runtime, abortSignal, ws
     wsClient.on("message", async (frame) => {
       try {
         await withTimeout(
-          processWsMessage({ frame, account, config, runtime, wsClient }),
+          processWsMessage({ frame, account, config, runtime, wsClient, reqIdStore }),
           MESSAGE_PROCESS_TIMEOUT_MS,
           `Message processing timed out (msgId=${frame?.body?.msgid ?? "unknown"})`,
         );
@@ -1552,14 +1881,20 @@ export async function startWsMonitor({ account, config, runtime, abortSignal, ws
 }
 
 export const wsMonitorTesting = {
+  buildWsStreamContent,
+  ensureDefaultSessionReasoningLevel,
+  resolveWsKeepaliveContent,
   processWsMessage,
   parseMessageContent,
   splitReplyMediaFromText,
   buildBodyForAgent,
+  normalizeReplyMediaUrlForLoad,
   flushPendingRepliesViaAgentApi,
+  stripThinkTags,
+  finishThinkingStream,
 };
 
-export { buildReplyMediaGuidance };
+export { buildReplyMediaGuidance, ensureDefaultSessionReasoningLevel, normalizeReplyMediaUrlForLoad };
 
 // Shared internals used by callback-inbound.js
 export {

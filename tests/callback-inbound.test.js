@@ -11,7 +11,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import { parseCallbackMessageXml, createCallbackHandler } from "../wecom/callback-inbound.js";
+import os from "node:os";
+import path from "node:path";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  parseCallbackMessageXml,
+  createCallbackHandler,
+  callbackInboundTesting,
+} from "../wecom/callback-inbound.js";
 
 // ---------------------------------------------------------------------------
 // Crypto helpers (mirror callback-crypto.js internals for test data creation)
@@ -196,6 +203,76 @@ describe("parseCallbackMessageXml", () => {
       <MsgId>22222</MsgId>
     </xml>`;
     assert.equal(parseCallbackMessageXml(xml), null);
+  });
+});
+
+describe("loadLocalReplyMedia", () => {
+  it("loads workspace files in fallback mode when runtime.media is unavailable", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "wecom-callback-media-"));
+    const originalStateDir = process.env.OPENCLAW_STATE_DIR;
+
+    try {
+      process.env.OPENCLAW_STATE_DIR = tempDir;
+      const workspaceDir = path.join(tempDir, "workspace-test-agent");
+      const reportPath = path.join(workspaceDir, "report.txt");
+      await mkdir(workspaceDir, { recursive: true });
+      await writeFile(reportPath, "hello fallback");
+
+      const loaded = await callbackInboundTesting.loadLocalReplyMedia("/workspace/report.txt", {}, "test-agent", {});
+      assert.equal(loaded.buffer.toString("utf8"), "hello fallback");
+      assert.equal(loaded.filename, "report.txt");
+    } finally {
+      if (originalStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = originalStateDir;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects symlink escapes in fallback mode", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "wecom-callback-media-"));
+    const originalStateDir = process.env.OPENCLAW_STATE_DIR;
+
+    try {
+      process.env.OPENCLAW_STATE_DIR = tempDir;
+      const workspaceDir = path.join(tempDir, "workspace-test-agent");
+      const outsidePath = path.join(tempDir, "secret.txt");
+      const linkPath = path.join(workspaceDir, "secret-link.txt");
+      await mkdir(workspaceDir, { recursive: true });
+      await writeFile(outsidePath, "do not read");
+      await symlink(outsidePath, linkPath);
+
+      await assert.rejects(
+        callbackInboundTesting.loadLocalReplyMedia("/workspace/secret-link.txt", {}, "test-agent", {}),
+        /Sandbox violation/,
+      );
+    } finally {
+      if (originalStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = originalStateDir;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveCallbackFinalText", () => {
+  it("normalizes think-tag variants before returning visible text replies", () => {
+    const text = callbackInboundTesting.resolveCallbackFinalText("<thinking>先分析</thinking>\n最终答复", []);
+    assert.equal(text, "<think>先分析</think>\n最终答复");
+  });
+
+  it("does not inject the model-unavailable fallback for media-only replies", () => {
+    const text = callbackInboundTesting.resolveCallbackFinalText("", ["/workspace/USER.md"]);
+    assert.equal(text, "");
+  });
+
+  it("keeps the fallback for replies with neither text nor media", () => {
+    const text = callbackInboundTesting.resolveCallbackFinalText("", []);
+    assert.equal(text, "模型暂时无法响应，请稍后重试。");
   });
 });
 

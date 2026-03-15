@@ -41,10 +41,13 @@ import {
 } from "./constants.js";
 import { verifyCallbackSignature, decryptCallbackMessage } from "./callback-crypto.js";
 import { downloadCallbackMedia } from "./callback-media.js";
+import { assertPathInsideSandbox } from "./sandbox.js";
 import {
   buildInboundContext,
+  ensureDefaultSessionReasoningLevel,
   resolveChannelCore,
   normalizeReplyPayload,
+  normalizeReplyMediaUrlForLoad,
   resolveReplyMediaLocalRoots,
 } from "./ws-monitor.js";
 
@@ -169,19 +172,36 @@ async function loadLocalReplyMedia(mediaUrl, config, agentId, runtime) {
   if (!normalized.startsWith("/") && !normalized.startsWith("sandbox:")) {
     throw new Error(`Unsupported callback reply media URL scheme: ${mediaUrl}`);
   }
+  const normalizedLocalPath = normalizeReplyMediaUrlForLoad(normalized, config, agentId);
+  if (!normalizedLocalPath) {
+    throw new Error(`Invalid callback reply media path: ${mediaUrl}`);
+  }
 
   if (typeof runtime?.media?.loadWebMedia === "function") {
     const localRoots = resolveReplyMediaLocalRoots(config, agentId);
-    const loaded = await runtime.media.loadWebMedia(normalized.replace(/^sandbox:\/{0,2}/, "/"), { localRoots });
-    const filename = loaded.fileName || path.basename(normalized.replace(/^sandbox:\/+/, "")) || "file";
+    const loaded = await runtime.media.loadWebMedia(normalizedLocalPath, { localRoots });
+    const filename = loaded.fileName || path.basename(normalizedLocalPath) || "file";
     return { buffer: loaded.buffer, filename, contentType: loaded.contentType || "" };
   }
 
-  // Fallback when runtime.media is unavailable
+  // Fallback when runtime.media is unavailable — enforce local roots check manually
+  const localRoots = resolveReplyMediaLocalRoots(config, agentId);
+  const resolvedPath = path.resolve(normalizedLocalPath);
+  await assertPathInsideSandbox(resolvedPath, localRoots);
   const { readFile } = await import("node:fs/promises");
-  const localPath = normalized.replace(/^sandbox:\/{0,2}/, "");
-  const buffer = await readFile(localPath);
-  return { buffer, filename: path.basename(localPath) || "file", contentType: "" };
+  const buffer = await readFile(resolvedPath);
+  return { buffer, filename: path.basename(resolvedPath) || "file", contentType: "" };
+}
+
+function resolveCallbackFinalText(accumulatedText, replyMediaUrls = []) {
+  const normalizedText = normalizeThinkingTags(String(accumulatedText ?? "").trim());
+  if (normalizedText) {
+    return normalizedText;
+  }
+  if (replyMediaUrls.length > 0) {
+    return "";
+  }
+  return "模型暂时无法响应，请稍后重试。";
 }
 
 // ---------------------------------------------------------------------------
@@ -347,20 +367,43 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
   });
   ctxPayload.CommandAuthorized = commandAuthorized;
 
-  void core.session
-    .recordSessionMetaFromInbound({
-      storePath,
-      sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
-      ctx: ctxPayload,
-    })
-    .catch((err) => logger.error(`[CB] Session meta record failed: ${err.message}`));
+  await ensureDefaultSessionReasoningLevel({
+    core,
+    storePath,
+    sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
+    ctx: ctxPayload,
+    channelTag: "CB",
+  });
 
   // --- Dispatch ---
-  const state = { accumulatedText: "", replyMediaUrls: [] };
+  const dispatchStartedAt = Date.now();
+  const logPerf = (event, extra = {}) => {
+    logger.info(`[CB:${account.accountId}] ${event}`, {
+      msgId,
+      senderId,
+      chatId,
+      routeAgentId: route.agentId,
+      sessionKey: route.sessionKey,
+      elapsedMs: Date.now() - dispatchStartedAt,
+      ...extra,
+    });
+  };
+
+  const state = {
+    accumulatedText: "",
+    replyMediaUrls: [],
+    deliveryCount: 0,
+    firstDeliveryAt: 0,
+  };
   const streamId = `cb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   const runDispatch = async () => {
     try {
+      logPerf("dispatch_start", {
+        mediaCount: mediaList.length,
+        hasText: Boolean(effectiveText),
+        streamId,
+      });
       await streamContext.run(
         { streamId, streamKey: peerId, agentId: route.agentId, accountId: account.accountId },
         async () => {
@@ -370,8 +413,18 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
             // Disable block-streaming since Agent API replies are sent atomically
             replyOptions: { disableBlockStreaming: true },
             dispatcherOptions: {
-              deliver: async (payload) => {
+              deliver: async (payload, info = {}) => {
                 const normalized = normalizeReplyPayload(payload);
+                state.deliveryCount += 1;
+                if (!state.firstDeliveryAt) {
+                  state.firstDeliveryAt = Date.now();
+                  logPerf("first_reply_block_received", {
+                    kind: info.kind ?? "unknown",
+                    textLength: normalized.text.length,
+                    mediaCount: normalized.mediaUrls.length,
+                    deliveryCount: state.deliveryCount,
+                  });
+                }
                 state.accumulatedText += normalized.text;
                 for (const mediaUrl of normalized.mediaUrls) {
                   if (!state.replyMediaUrls.includes(mediaUrl)) {
@@ -387,7 +440,13 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
         },
       );
 
-      const finalText = normalizeThinkingTags(state.accumulatedText.trim()) || "模型暂时无法响应，请稍后重试。";
+      logPerf("dispatch_returned", {
+        totalOutputChars: state.accumulatedText.length,
+        replyMediaCount: state.replyMediaUrls.length,
+        deliveryCount: state.deliveryCount,
+      });
+
+      const finalText = resolveCallbackFinalText(state.accumulatedText, state.replyMediaUrls);
 
       if (!account.agentCredentials) {
         logger.warn(`[CB:${account.accountId}] No agent credentials configured; callback reply skipped`);
@@ -397,24 +456,32 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
       const target = isGroupChat ? { chatId } : { toUser: senderId };
 
       // Send reply text (chunked to stay within WeCom message size limits)
-      const chunks = splitTextByByteLimit(finalText, TEXT_CHUNK_LIMIT);
-      logger.info(`[CB:${account.accountId}] → outbound`, {
-        senderId,
-        chatId,
-        format: account.agentReplyFormat,
-        chunks: chunks.length,
-        totalLength: finalText.length,
-        preview: finalText.slice(0, 80),
-      });
-      for (const chunk of chunks) {
-        await agentSendText({
-          agent: account.agentCredentials,
-          ...target,
-          text: chunk,
+      const chunks = finalText ? splitTextByByteLimit(finalText, TEXT_CHUNK_LIMIT) : [];
+      if (chunks.length > 0) {
+        logger.info(`[CB:${account.accountId}] → outbound`, {
+          senderId,
+          chatId,
           format: account.agentReplyFormat,
+          chunks: chunks.length,
+          totalLength: finalText.length,
+          preview: finalText.slice(0, 80),
+        });
+        for (const chunk of chunks) {
+          await agentSendText({
+            agent: account.agentCredentials,
+            ...target,
+            text: chunk,
+            format: account.agentReplyFormat,
+          });
+        }
+        recordOutboundActivity({ accountId: account.accountId });
+      } else {
+        logger.info(`[CB:${account.accountId}] → outbound text skipped`, {
+          senderId,
+          chatId,
+          reason: state.replyMediaUrls.length > 0 ? "media_only_reply" : "empty_reply",
         });
       }
-      recordOutboundActivity({ accountId: account.accountId });
 
       // Send any LLM-generated media (MEDIA:/FILE: directives in reply)
       for (const mediaUrl of state.replyMediaUrls) {
@@ -443,8 +510,19 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
           logger.error(`[CB:${account.accountId}] Failed to send reply media: ${mediaError.message}`);
         }
       }
+      logPerf("dispatch_complete", {
+        totalOutputChars: state.accumulatedText.length,
+        replyMediaCount: state.replyMediaUrls.length,
+        deliveryCount: state.deliveryCount,
+      });
     } catch (error) {
       logger.error(`[CB:${account.accountId}] Dispatch error: ${error.message}`);
+      logPerf("dispatch_failed", {
+        error: error.message,
+        totalOutputChars: state.accumulatedText.length,
+        replyMediaCount: state.replyMediaUrls.length,
+        deliveryCount: state.deliveryCount,
+      });
       if (account.agentCredentials) {
         const target = isGroupChat ? { chatId } : { toUser: senderId };
         try {
@@ -463,10 +541,27 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
 
   // Serialise per-sender to prevent concurrent replies to the same user
   const lockKey = `${account.accountId}:${peerId}`;
+  const queuedAt = Date.now();
+  logPerf("dispatch_enqueued", { lockKey });
   const previous = dispatchLocks.get(lockKey) ?? Promise.resolve();
-  const current = previous.then(runDispatch, runDispatch);
+  const current = previous.then(
+    async () => {
+      const queueWaitMs = Date.now() - queuedAt;
+      if (queueWaitMs >= 50) {
+        logPerf("dispatch_lock_acquired", { queueWaitMs });
+      }
+      return await runDispatch();
+    },
+    async () => {
+      const queueWaitMs = Date.now() - queuedAt;
+      if (queueWaitMs >= 50) {
+        logPerf("dispatch_lock_acquired", { queueWaitMs, previousFailed: true });
+      }
+      return await runDispatch();
+    },
+  );
   dispatchLocks.set(lockKey, current);
-  current.finally(() => {
+  return await current.finally(() => {
     if (dispatchLocks.get(lockKey) === current) {
       dispatchLocks.delete(lockKey);
     }
@@ -616,3 +711,8 @@ export function createCallbackHandler({ account, config, runtime }) {
     return true;
   };
 }
+
+export const callbackInboundTesting = {
+  loadLocalReplyMedia,
+  resolveCallbackFinalText,
+};

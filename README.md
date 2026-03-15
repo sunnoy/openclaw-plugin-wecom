@@ -435,11 +435,15 @@ Webhook 只负责群通知。
 
 ### Workspace 模板
 
-`workspaceTemplate` 目录中的 bootstrap 文件会在动态 Agent 首次创建时复制到工作区：
+`workspaceTemplate` 目录中的模板文件会在动态 Agent 首次创建时复制到工作区：
 
 - `AGENTS.md`、`BOOTSTRAP.md`、`CLAUDE.md`、`SOUL.md`、`TOOLS.md`、`IDENTITY.md`、`USER.md`、`HEARTBEAT.md`、`system-prompt.md`
 
-模板支持 mtime 变更检测 — 当模板文件更新后，下次 Agent 启动会增量同步。
+插件会在工作区里写入 `.openclaw/wecom-template-state.json` 记录首次模板同步状态。已有 state 的工作区后续只补缺，不覆盖已有文件。
+
+`BOOTSTRAP.md` 只会在工作区还没有 `memory/` 或 `MEMORY.md` 时参与同步；一旦工作区已经出现记忆痕迹，插件就不再回种 bootstrap，避免打断已完成 onboarding 的会话。
+
+历史工作区如果还没有 state，插件会先补写 state，再按“只补缺、不覆盖”处理，避免存量工作区被重新整批同步。
 
 ### Bindings
 
