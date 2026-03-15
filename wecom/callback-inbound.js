@@ -168,7 +168,7 @@ export function parseCallbackMessageXml(xml) {
 // ---------------------------------------------------------------------------
 
 async function loadLocalReplyMedia(mediaUrl, config, agentId, runtime) {
-  const normalized = String(mediaUrl ?? "").trim();
+  const normalized = String(mediaUrl ?? "").trim().replaceAll("\\", "/");;
   if (!normalized.startsWith("/") && !normalized.startsWith("sandbox:")) {
     throw new Error(`Unsupported callback reply media URL scheme: ${mediaUrl}`);
   }
