@@ -41,4 +41,20 @@ describe("resolveWecomTarget", () => {
     // "webhook:wecom:something" should NOT strip "wecom:" — it's a webhook name
     assert.deepEqual(resolveWecomTarget("webhook:wecom:something"), { webhook: "wecom:something" });
   });
+
+  it("treats short digit strings as department (party) IDs", () => {
+    assert.deepEqual(resolveWecomTarget("2"), { toParty: "2" });
+    assert.deepEqual(resolveWecomTarget("999"), { toParty: "999" });
+    assert.deepEqual(resolveWecomTarget("wecom:42"), { toParty: "42" });
+    assert.deepEqual(resolveWecomTarget("123456"), { toParty: "123456" });
+  });
+
+  it("treats long digit strings (phone numbers) as user IDs", () => {
+    assert.deepEqual(resolveWecomTarget("wecom:13800001111"), { toUser: "13800001111" });
+    assert.deepEqual(resolveWecomTarget("1380000111"), { toUser: "1380000111" });
+  });
+
+  it("explicit party: prefix still works for long digit strings", () => {
+    assert.deepEqual(resolveWecomTarget("party:13800001111"), { toParty: "13800001111" });
+  });
 });

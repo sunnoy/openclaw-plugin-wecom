@@ -47,8 +47,9 @@ export function resolveWecomTarget(raw) {
   if (/^(wr|wc)/i.test(clean)) {
     return { chatId: clean };
   }
-  // Pure digits are likely department (party) IDs.
-  if (/^\d+$/.test(clean)) {
+  // Short pure-digit strings (≤6 digits) are department (party) IDs.
+  // Longer digit strings (phone numbers, external IDs) fall through to toUser.
+  if (/^\d{1,6}$/.test(clean)) {
     return { toParty: clean };
   }
 
