@@ -321,10 +321,6 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
       ? generateAgentId(peerKind, peerId, account.accountId)
       : null;
 
-  if (dynamicAgentId) {
-    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate);
-  }
-
   const route = core.routing.resolveAgentRoute({
     cfg: config,
     channel: CHANNEL_ID,
@@ -337,9 +333,12 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
     config.bindings.some(
       (b) => b.match?.channel === CHANNEL_ID && b.match?.accountId === account.accountId,
     );
+
   if (dynamicAgentId && !hasExplicitBinding) {
+    const baseAgentId = route.agentId;
+    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId);
+    route.sessionKey = route.sessionKey.replace(`agent:${baseAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
-    route.sessionKey = `agent:${dynamicAgentId}:${peerKind}:${peerId}`;
   }
 
   // Build a body object that mirrors the WS frame.body structure expected by

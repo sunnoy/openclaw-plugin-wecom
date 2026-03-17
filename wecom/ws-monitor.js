@@ -1547,10 +1547,6 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
       ? generateAgentId(peerKind, peerId, account.accountId)
       : null;
 
-  if (dynamicAgentId) {
-    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate);
-  }
-
   const route = core.routing.resolveAgentRoute({
     cfg: config,
     channel: CHANNEL_ID,
@@ -1565,8 +1561,10 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     );
 
   if (dynamicAgentId && !hasExplicitBinding) {
+    const baseAgentId = route.agentId;
+    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId);
+    route.sessionKey = route.sessionKey.replace(`agent:${baseAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
-    route.sessionKey = `agent:${dynamicAgentId}:${peerKind}:${peerId}`;
   }
 
   const { ctxPayload, storePath } = buildInboundContext({

@@ -42,6 +42,106 @@ describe("upsertAgentIdOnlyEntry", () => {
       { id: "wecom-dm-lirui", heartbeat: { every: "5m" } },
     ]);
   });
+
+  it("inherits model/subagents/tools from base agent for new entries", () => {
+    const cfg = {
+      agents: {
+        list: [
+          {
+            id: "main",
+            model: "claude-sonnet-4-20250514",
+            subagents: { allow: ["researcher"] },
+            tools: { allow: ["web-search"] },
+          },
+        ],
+      },
+    };
+    const changed = upsertAgentIdOnlyEntry(cfg, "wecom-dm-user1", "main");
+
+    assert.equal(changed, true);
+    const newEntry = cfg.agents.list.find((e) => e.id === "wecom-dm-user1");
+    assert.equal(newEntry.model, "claude-sonnet-4-20250514");
+    assert.deepEqual(newEntry.subagents, { allow: ["researcher"] });
+    assert.deepEqual(newEntry.tools, { allow: ["web-search"] });
+  });
+
+  it("backfills missing properties on existing empty entries", () => {
+    const cfg = {
+      agents: {
+        list: [
+          {
+            id: "main",
+            model: "claude-sonnet-4-20250514",
+            subagents: { allow: ["researcher"] },
+            tools: { allow: ["web-search"] },
+          },
+          { id: "wecom-dm-user2", heartbeat: {} },
+        ],
+      },
+    };
+    const changed = upsertAgentIdOnlyEntry(cfg, "wecom-dm-user2", "main");
+
+    assert.equal(changed, true);
+    const entry = cfg.agents.list.find((e) => e.id === "wecom-dm-user2");
+    assert.equal(entry.model, "claude-sonnet-4-20250514");
+    assert.deepEqual(entry.subagents, { allow: ["researcher"] });
+    assert.deepEqual(entry.tools, { allow: ["web-search"] });
+  });
+
+  it("preserves user customizations when backfilling existing entries", () => {
+    const cfg = {
+      agents: {
+        list: [
+          {
+            id: "main",
+            model: "claude-sonnet-4-20250514",
+            subagents: { allow: ["researcher"] },
+            tools: { allow: ["web-search"] },
+          },
+          { id: "wecom-dm-user3", heartbeat: {}, model: "claude-haiku-4-20250506" },
+        ],
+      },
+    };
+    const changed = upsertAgentIdOnlyEntry(cfg, "wecom-dm-user3", "main");
+
+    assert.equal(changed, true);
+    const entry = cfg.agents.list.find((e) => e.id === "wecom-dm-user3");
+    // User's custom model preserved
+    assert.equal(entry.model, "claude-haiku-4-20250506");
+    // Missing properties backfilled from base
+    assert.deepEqual(entry.subagents, { allow: ["researcher"] });
+    assert.deepEqual(entry.tools, { allow: ["web-search"] });
+  });
+
+  it("returns false for fully populated existing entry", () => {
+    const cfg = {
+      agents: {
+        list: [
+          {
+            id: "main",
+            model: "claude-sonnet-4-20250514",
+            subagents: { allow: ["researcher"] },
+            tools: { allow: ["web-search"] },
+          },
+          {
+            id: "wecom-dm-user4",
+            heartbeat: {},
+            model: "claude-haiku-4-20250506",
+            subagents: { allow: [] },
+            tools: { deny: ["dangerous"] },
+          },
+        ],
+      },
+    };
+    const changed = upsertAgentIdOnlyEntry(cfg, "wecom-dm-user4", "main");
+
+    assert.equal(changed, false);
+    const entry = cfg.agents.list.find((e) => e.id === "wecom-dm-user4");
+    // All original values preserved
+    assert.equal(entry.model, "claude-haiku-4-20250506");
+    assert.deepEqual(entry.subagents, { allow: [] });
+    assert.deepEqual(entry.tools, { deny: ["dangerous"] });
+  });
 });
 
 describe("seedAgentWorkspace", () => {
