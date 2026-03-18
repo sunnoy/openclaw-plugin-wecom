@@ -1,6 +1,7 @@
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { logger } from "./logger.js";
 import { wecomChannelPlugin } from "./wecom/channel-plugin.js";
+import { createWeComMcpTool } from "./wecom/mcp-tool.js";
 import { setOpenclawConfig, setRuntime } from "./wecom/state.js";
 import { buildReplyMediaGuidance } from "./wecom/ws-monitor.js";
 import { listAccountIds, resolveAccount } from "./wecom/accounts.js";
@@ -16,6 +17,7 @@ const plugin = {
     setRuntime(api.runtime);
     setOpenclawConfig(api.config);
     api.registerChannel({ plugin: wecomChannelPlugin });
+    api.registerTool(createWeComMcpTool(), { name: "wecom_mcp" });
 
     // Register HTTP callback endpoints for all accounts that have callback config
     for (const accountId of listAccountIds(api.config)) {

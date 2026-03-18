@@ -26,6 +26,10 @@ export const REQID_FLUSH_DEBOUNCE_MS = 1_000;
 export const PENDING_REPLY_TTL_MS = 5 * 60 * 1000;
 export const PENDING_REPLY_MAX_SIZE = 50;
 
+// WeCom stream messages expire ~6 minutes after creation. Rotate the stream
+// before hitting that hard limit so the user never sees a dead stream.
+export const STREAM_MAX_LIFETIME_MS = 5 * 60 * 1000;
+
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const VIDEO_MAX_BYTES = 10 * 1024 * 1024;
 export const VOICE_MAX_BYTES = 2 * 1024 * 1024;

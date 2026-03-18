@@ -30,6 +30,7 @@ import {
   MEDIA_IMAGE_PLACEHOLDER,
   MESSAGE_PROCESS_TIMEOUT_MS,
   REPLY_SEND_TIMEOUT_MS,
+  STREAM_MAX_LIFETIME_MS,
   THINKING_MESSAGE,
   WS_HEARTBEAT_INTERVAL_MS,
   WS_MAX_RECONNECT_ATTEMPTS,
@@ -72,8 +73,9 @@ const VISIBLE_STREAM_THROTTLE_MS = 800;
 // Reserve headroom below the SDK's per-reqId queue limit (100) so the final
 // reply always has room.
 const MAX_INTERMEDIATE_STREAM_MESSAGES = 85;
-// WeCom stream messages expire if not updated within 6 minutes. Send a
-// keepalive update every 4 minutes to keep the stream alive during long runs.
+// WeCom stream messages have a hard 6-minute absolute lifetime from creation.
+// Keepalive updates every 4 minutes maintain visible progress but do NOT extend
+// the lifetime.  Stream rotation (see rotateStream) is the actual fix.
 const STREAM_KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;
 // Match MEDIA:/FILE: directives at line start, optionally preceded by markdown list markers.
 const REPLY_MEDIA_DIRECTIVE_PATTERN = /^\s*(?:[-*•]\s+|\d+\.\s+)?(?:MEDIA|FILE)\s*:/im;
@@ -588,6 +590,14 @@ async function finishThinkingStream({ wsClient, frame, state, accountId }) {
     finishText = buildWsStreamContent({
       reasoningText: state.reasoningText,
       visibleText: finalVisibleText,
+      finish: true,
+    });
+  } else if (state.reasoningText) {
+    // If the model only emitted reasoning tokens, close the thinking stream
+    // instead of replacing it with a generic completion stub.
+    finishText = buildWsStreamContent({
+      reasoningText: state.reasoningText,
+      visibleText: "",
       finish: true,
     });
   } else if (state.hasMedia) {
@@ -1146,6 +1156,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     accumulatedText: "",
     reasoningText: "",
     streamId,
+    streamCreatedAt: Date.now(),
     replyMediaUrls: [],
     pendingMediaUrls: [],
     hasMedia: false,
@@ -1166,6 +1177,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
   let lastNonEmptyStreamText = "";
   let lastForwardedVisibleText = "";
   let keepaliveTimer = null;
+  let rotationTimer = null;
   let waitingModelTimer = null;
   let waitingModelSeconds = 0;
   let waitingModelActive = false;
@@ -1414,6 +1426,75 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     }, STREAM_KEEPALIVE_INTERVAL_MS);
   };
 
+  // --- Stream rotation: finish the current stream before the 6-minute hard
+  //     limit and seamlessly continue on a new streamId. ----
+
+  const rotateStream = async () => {
+    // Flush any pending throttled updates to the current stream first.
+    await flushPendingStreamUpdates();
+
+    const oldStreamId = state.streamId;
+    const hasVisibleText = Boolean(stripThinkTags(state.accumulatedText));
+
+    // Build finish content.  When still in the thinking phase (no visible
+    // text yet), append a small marker so the finished message is not empty.
+    const finishText = buildWsStreamContent({
+      reasoningText: state.reasoningText,
+      visibleText: hasVisibleText ? state.accumulatedText : "⏳ 处理中…",
+      finish: true,
+    });
+
+    try {
+      streamMessagesSent++;
+      await sendWsReply({
+        wsClient,
+        frame,
+        streamId: oldStreamId,
+        text: finishText,
+        finish: true,
+        accountId: account.accountId,
+      });
+    } catch (err) {
+      logger.warn(`[WS] Stream rotation: failed to finish old stream: ${err.message}`);
+    }
+
+    // Switch to new stream.
+    const newStreamId = generateReqId("stream");
+    state.streamId = newStreamId;
+    state.streamCreatedAt = Date.now();
+    state.accumulatedText = "";
+    state.reasoningText = "";
+
+    // Reset per-stream counters.
+    streamMessagesSent = 0;
+    lastStreamSentAt = Date.now();
+    lastReasoningSendAt = 0;
+    lastVisibleSendAt = 0;
+    lastNonEmptyStreamText = "";
+    lastForwardedVisibleText = "";
+
+    if (reqIdStore) reqIdStore.set(chatId, newStreamId);
+
+    logPerf("stream_rotated", { oldStreamId, newStreamId });
+
+    // Re-arm timers for the new stream.
+    scheduleRotation();
+    scheduleKeepalive();
+  };
+
+  const scheduleRotation = () => {
+    if (rotationTimer) clearTimeout(rotationTimer);
+    const remaining = STREAM_MAX_LIFETIME_MS - (Date.now() - state.streamCreatedAt);
+    if (remaining <= 0) {
+      void rotateStream();
+      return;
+    }
+    rotationTimer = setTimeout(() => {
+      rotationTimer = null;
+      void rotateStream();
+    }, remaining);
+  };
+
   const cancelPendingTimers = () => {
     if (pendingReasoningTimer) {
       clearTimeout(pendingReasoningTimer);
@@ -1426,6 +1507,10 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     if (keepaliveTimer) {
       clearTimeout(keepaliveTimer);
       keepaliveTimer = null;
+    }
+    if (rotationTimer) {
+      clearTimeout(rotationTimer);
+      rotationTimer = null;
     }
     stopWaitingModelUpdates();
   };
@@ -1451,6 +1536,7 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
   }
   lastStreamSentAt = Date.now();
   scheduleKeepalive();
+  scheduleRotation();
 
   const peerKind = isGroupChat ? "group" : "dm";
   const peerId = isGroupChat ? chatId : senderId;
