@@ -1547,10 +1547,6 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
       ? generateAgentId(peerKind, peerId, account.accountId)
       : null;
 
-  if (dynamicAgentId) {
-    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate);
-  }
-
   const route = core.routing.resolveAgentRoute({
     cfg: config,
     channel: CHANNEL_ID,
@@ -1565,8 +1561,15 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     );
 
   if (dynamicAgentId && !hasExplicitBinding) {
+    const routeAgentId = route.agentId;
+    // Use the account's configured agentId as the base for property inheritance
+    // (model, subagents, tools). route.agentId may resolve to "main" when
+    // there is no explicit binding, but the account's agentId points to the
+    // actual parent agent whose properties the dynamic agent should inherit.
+    const baseAgentId = account.config.agentId || routeAgentId;
+    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId);
+    route.sessionKey = route.sessionKey.replace(`agent:${routeAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
-    route.sessionKey = `agent:${dynamicAgentId}:${peerKind}:${peerId}`;
   }
 
   const { ctxPayload, storePath } = buildInboundContext({

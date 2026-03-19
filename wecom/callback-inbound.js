@@ -321,10 +321,6 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
       ? generateAgentId(peerKind, peerId, account.accountId)
       : null;
 
-  if (dynamicAgentId) {
-    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate);
-  }
-
   const route = core.routing.resolveAgentRoute({
     cfg: config,
     channel: CHANNEL_ID,
@@ -337,9 +333,17 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
     config.bindings.some(
       (b) => b.match?.channel === CHANNEL_ID && b.match?.accountId === account.accountId,
     );
+
   if (dynamicAgentId && !hasExplicitBinding) {
+    const routeAgentId = route.agentId;
+    // Use the account's configured agentId as the base for property inheritance
+    // (model, subagents, tools). route.agentId may resolve to "main" when
+    // there is no explicit binding, but the account's agentId points to the
+    // actual parent agent whose properties the dynamic agent should inherit.
+    const baseAgentId = account.config.agentId || routeAgentId;
+    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId);
+    route.sessionKey = route.sessionKey.replace(`agent:${routeAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
-    route.sessionKey = `agent:${dynamicAgentId}:${peerKind}:${peerId}`;
   }
 
   // Build a body object that mirrors the WS frame.body structure expected by

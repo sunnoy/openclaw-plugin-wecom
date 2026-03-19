@@ -220,7 +220,7 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
   }
 }
 
-export function upsertAgentIdOnlyEntry(cfg, agentId) {
+export function upsertAgentIdOnlyEntry(cfg, agentId, baseAgentId) {
   const normalizedId = String(agentId || "")
     .trim()
     .toLowerCase();
@@ -252,8 +252,44 @@ export function upsertAgentIdOnlyEntry(cfg, agentId) {
   }
 
   if (!existingIds.has(normalizedId)) {
-    nextList.push({ id: normalizedId, heartbeat: {} });
+    const entry = { id: normalizedId, heartbeat: {} };
+
+    // Inherit inheritable properties from the base agent so the dynamic
+    // agent retains model, subagents (spawn permissions), and tool config.
+    if (baseAgentId) {
+      const baseEntry = currentList.find(
+        (e) => e && typeof e.id === "string" && e.id === baseAgentId,
+      );
+      if (baseEntry) {
+        for (const key of ["model", "subagents", "tools"]) {
+          if (baseEntry[key] != null) {
+            entry[key] = JSON.parse(JSON.stringify(baseEntry[key]));
+          }
+        }
+      }
+    }
+
+    nextList.push(entry);
     changed = true;
+  } else if (baseAgentId) {
+    // Backfill missing inheritable properties on existing entries that were
+    // persisted before the inheritance logic was added.
+    const existingEntry = nextList.find(
+      (e) => e && typeof e.id === "string" && e.id.trim().toLowerCase() === normalizedId,
+    );
+    if (existingEntry) {
+      const baseEntry = currentList.find(
+        (e) => e && typeof e.id === "string" && e.id === baseAgentId,
+      );
+      if (baseEntry) {
+        for (const key of ["model", "subagents", "tools"]) {
+          if (existingEntry[key] == null && baseEntry[key] != null) {
+            existingEntry[key] = JSON.parse(JSON.stringify(baseEntry[key]));
+            changed = true;
+          }
+        }
+      }
+    }
   }
 
   if (changed) {
@@ -263,7 +299,7 @@ export function upsertAgentIdOnlyEntry(cfg, agentId) {
   return changed;
 }
 
-export async function ensureDynamicAgentListed(agentId, templateDir) {
+export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId) {
   const normalizedId = String(agentId || "")
     .trim()
     .toLowerCase();
@@ -285,7 +321,7 @@ export async function ensureDynamicAgentListed(agentId, templateDir) {
       }
 
       // Upsert into in-memory config so the running gateway sees it immediately.
-      const changed = upsertAgentIdOnlyEntry(openclawConfig, normalizedId);
+      const changed = upsertAgentIdOnlyEntry(openclawConfig, normalizedId, baseAgentId);
       if (changed) {
         logger.info("WeCom: dynamic agent added to in-memory agents.list", { agentId: normalizedId });
 
