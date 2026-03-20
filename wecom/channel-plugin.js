@@ -618,6 +618,17 @@ export const wecomChannelPlugin = {
       setConfigProxyUrl(network.egressProxyUrl ?? "");
       setApiBaseUrl(network.apiBaseUrl ?? "");
 
+      // Callback-only accounts (Agent API) don't need WS monitor.
+      // Return a promise that stays alive until the gateway signals shutdown,
+      // so the account is marked as running (not exited → no auto-restart).
+      if (!ctx.account.botId && !ctx.account.secret) {
+        return new Promise((resolve) => {
+          if (ctx.abortSignal) {
+            ctx.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+          }
+        });
+      }
+
       return startWsMonitor({
         account: ctx.account,
         config: ctx.cfg,
