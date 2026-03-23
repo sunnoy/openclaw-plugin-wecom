@@ -14,6 +14,7 @@
 
 ### Fixes
 
+- **Callback-only 账户启动修复 (#137)**: `startAccount` 跳过无 WS 凭据的 callback-only 账户的 WS monitor，防止 gateway restart 循环崩溃
 - **动态 Agent 配置写入安全检查 (#136)**: `ensureDynamicAgentListed` 写入前验证内存配置含 `channels` 段，防止不完整快照覆盖用户配置文件
 - **`replyFormat: "text"` 全路径生效 (#139)**: `sendViaAgent` 传递 `format` 参数，`sendViaWebhook` 根据配置选择 `webhookSendText` / `webhookSendMarkdown`，个人微信端不再显示"暂不支持此消息类型"
 - **MCP unsupported category 错误增强 (#140)**: 返回企业规模限制说明 + 更明确的停止重试指令，减少 LLM 无效探索
