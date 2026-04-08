@@ -211,7 +211,7 @@ npm test
 | `channels.wecom.groupChat.requireMention` | boolean | 否 | 群聊是否要求 @ 才响应，默认 `true` |
 | `channels.wecom.groupChat.mentionPatterns` | string[] | 否 | 群聊触发前缀，默认 `["@"]` |
 | `channels.wecom.workspaceTemplate` | string | 否 | 动态 Agent 工作区模板目录 |
-| `channels.wecom.mediaLocalRoots` | string[] | 否 | 额外允许被动回复读取的宿主机目录列表。用于放行 `MEDIA:/abs/path` 或 `FILE:/abs/path` 指向的本地文件；默认只允许当前 Agent workspace 和浏览器产物目录。多账号模式下也可配置在 `channels.wecom.<accountId>.mediaLocalRoots`。修改后需重启 Gateway 生效 |
+| `channels.wecom.mediaLocalRoots` | string[] | 否 | 额外允许被动回复读取的宿主机目录列表。用于放行 `MEDIA:/abs/path` 或 `FILE:/abs/path` 指向的本地文件；默认只允许当前 Agent workspace 和浏览器产物目录。注意：浏览器工具返回的宿主机路径在 block reply 阶段仍可能被 core sandbox 校验拦下，建议先用 `stage_browser_media` 复制到 `/workspace/...` 后再回复。多账号模式下也可配置在 `channels.wecom.<accountId>.mediaLocalRoots`。修改后需重启 Gateway 生效 |
 
 ### 增强出站配置
 
@@ -387,7 +387,7 @@ Webhook 只负责群通知。
 - 图片使用 `MEDIA:/abs/path`
 - PDF、音频、视频、压缩包、Office 文档等非图片文件使用 `FILE:/abs/path`
 - 沙箱内当前工作区文件可直接写成 `MEDIA:/workspace/...` 或 `FILE:/workspace/...`
-- 浏览器生成的文件默认允许从 OpenClaw 状态目录下的浏览器媒体目录读取
+- 浏览器生成的文件默认允许从 OpenClaw 状态目录下的浏览器媒体目录读取，但如果浏览器工具返回的是宿主机绝对路径，先调用 `stage_browser_media`，再使用它返回的 `MEDIA:/workspace/...` 或 `FILE:/workspace/...`
 - 宿主机其他目录默认不放行；如果需要回复 `/tmp/openclaw/report.pdf` 这类文件，请把其父目录加入 `channels.wecom.mediaLocalRoots`，多账号模式可配在 `channels.wecom.<accountId>.mediaLocalRoots`
 - 更新 `mediaLocalRoots` 后需重启 Gateway 生效
 
@@ -580,7 +580,7 @@ openclaw pairing approve wecom <code>
 先确认文件路径是否在允许目录里：
 
 - 当前 Agent 工作区文件默认允许，可直接用 `FILE:/workspace/...` 或 `MEDIA:/workspace/...`
-- 浏览器生成的文件默认允许
+- 浏览器生成的文件默认允许，但浏览器工具返回的宿主机路径建议先用 `stage_browser_media` 转成 `/workspace/...`
 - 宿主机其他目录需要把父目录加入 `channels.wecom.mediaLocalRoots`
 - 多账号模式如果只想对某个账号生效，可配置 `channels.wecom.<accountId>.mediaLocalRoots`
 

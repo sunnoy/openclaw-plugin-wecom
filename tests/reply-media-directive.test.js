@@ -139,6 +139,8 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("SKILL.md"));
     assert.ok(guidance.includes("path prefixed with FILE:"));
     assert.ok(guidance.includes("its own line"));
+    assert.ok(guidance.includes("stage_browser_media"));
+    assert.ok(guidance.includes("Do NOT echo raw browser host paths"));
     assert.ok(guidance.includes("[[sender:test-agent]]"));
     assert.ok(!guidance.includes("[WeCom image_studio rule]"));
   });
@@ -278,6 +280,21 @@ describe("normalizeReplyMediaUrlForLoad", () => {
   it("rewrites sandbox:/workspace paths into the agent workspace dir", () => {
     const expected = path.join(os.homedir(), ".openclaw", "workspace-test-agent", "report.pdf");
     const normalized = normalizeReplyMediaUrlForLoad("sandbox:/workspace/report.pdf", {}, "test-agent");
+    assert.equal(normalized, expected);
+  });
+
+  it("uses agents.defaults.workspace as the base for non-default agents", () => {
+    const expected = path.join("/data/openclaw/workspace", "test-agent", "report.pdf");
+    const normalized = normalizeReplyMediaUrlForLoad(
+      "/workspace/report.pdf",
+      {
+        agents: {
+          defaults: { workspace: "/data/openclaw/workspace" },
+          list: [{ id: "main" }, { id: "test-agent" }],
+        },
+      },
+      "test-agent",
+    );
     assert.equal(normalized, expected);
   });
 

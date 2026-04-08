@@ -358,9 +358,13 @@ function resolveAgentWorkspaceDir(config, agentId) {
   }
 
   const stateDir = resolveStateDir();
+  const defaultWorkspace = String(config?.agents?.defaults?.workspace ?? "").trim();
   if (normalizedAgentId === resolveDefaultAgentId(config)) {
-    const defaultWorkspace = String(config?.agents?.defaults?.workspace ?? "").trim();
     return defaultWorkspace ? resolveUserPath(defaultWorkspace) : path.join(stateDir, "workspace");
+  }
+
+  if (defaultWorkspace) {
+    return path.join(resolveUserPath(defaultWorkspace), normalizedAgentId);
   }
 
   return path.join(stateDir, `workspace-${normalizedAgentId}`);
@@ -425,11 +429,15 @@ function buildReplyMediaGuidance(config, agentId) {
     `Local reply files are allowed only under the current workspace: ${workspaceDir}`,
     "Inside the agent sandbox, that same workspace is visible as /workspace.",
     `Browser-generated files are also allowed only under: ${browserMediaDir}`,
+    "CRITICAL: Do NOT echo raw browser host paths from browser tools directly in the final reply.",
+    "If a browser tool returns MEDIA:/... or FILE:/... under that browser media directory, call stage_browser_media first.",
+    "stage_browser_media copies the browser file into the current workspace and returns a safe /workspace/... directive for the final reply.",
     "Do NOT call message.send or message.sendAttachment to deliver files back to the current WeCom chat/user; use MEDIA: or FILE: directives instead.",
-    "For images: put each image path on its own line as MEDIA:/abs/path.",
+    "CRITICAL: MEDIA: and FILE: directives MUST be placed INSIDE <final> tags. Directives placed outside <final> are silently discarded by the system and the file will never be sent.",
+    "For images: put each image path on its own line INSIDE <final> tags as MEDIA:/abs/path.",
     "If a local file is in the current sandbox workspace, use its /workspace/... path directly.",
-    "For every non-image file (PDF, MD, DOC, DOCX, XLS, XLSX, CSV, ZIP, MP4, TXT, etc.): put it on its own line as FILE:/abs/path.",
-    "Example: FILE:/workspace/skills/deep-research/SKILL.md",
+    "For every non-image file (PDF, MD, DOC, DOCX, XLS, XLSX, CSV, ZIP, MP4, TXT, etc.): put it on its own line INSIDE <final> tags as FILE:/abs/path.",
+    "Example: <final>报告已生成，请查收。\\nFILE:/workspace/report.xlsx\\n</final> — or for a skill file: <final>\\nFILE:/workspace/skills/deep-research/SKILL.md\\n</final>",
     "CRITICAL: Never use MEDIA: for non-image files. PDF must always use FILE:, never MEDIA:.",
     "CRITICAL: If a tool already returned a path prefixed with FILE: (e.g. FILE:/abs/path.pdf), keep the FILE: prefix exactly as-is. Do NOT change it to MEDIA:.",
     "Each directive MUST be on its own line with no other text on that line.",
@@ -522,7 +530,7 @@ function buildBodyForAgent(body, config, agentId) {
     `[[sender:${senderLabel}]]`,
     `Example: [[sender:${senderLabel}]]\\n你好`,
     "Do NOT add that header when replying in the current WeCom chat.",
-    "To send files back to the current WeCom chat, do NOT use message.send or message.sendAttachment; emit MEDIA:/... or FILE:/... directives on their own lines instead.",
+    "To send files back to the current WeCom chat, do NOT use message.send or message.sendAttachment; emit MEDIA:/... or FILE:/... directives on their own lines INSIDE <final> tags.",
   ].join("\n");
 
   return `${inlineRules}\n\n${body}`;

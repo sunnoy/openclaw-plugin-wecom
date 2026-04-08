@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.0.1 (2026-04-08)
+
+相对 [v3.0.0](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v3.0.0) 的变更摘要。
+
+### Fixes
+
+- **WeCom `/workspace/...` 宿主路径解析对齐新版 OpenClaw**: `ws-monitor` 和动态 agent workspace template 的路径计算改为优先读取 `agents.defaults.workspace` / `agents.list[].workspace`，非默认 agent 不再错误回退到 `~/.openclaw/workspace-<agentId>`，修复新版多 agent workspace 根目录迁移后 `FILE:/workspace/...` / `MEDIA:/workspace/...` 文件发送失败的问题
+- **回复文件发送引导强化**: WeCom reply guidance 明确要求把 `MEDIA:` / `FILE:` 指令放在 `<final>` 标签内，并补充 browser 媒体必须先 `stage_browser_media` 再回复，减少模型回错宿主路径或把指令写到标签外导致的静默丢失
+
+### Tests
+
+- 扩展 `tests/reply-media-directive.test.js`，覆盖 `agents.defaults.workspace` 作为非默认 agent workspace 基座时的 `/workspace/...` 解析
+- 扩展 `tests/workspace-template.test.js`，覆盖 dynamic agent workspace 路径计算与 template seed 对新版 workspace 根目录的兼容
+
 ## 3.0.0 (2026-03-24)
 
 相对 [v2.4.1](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v2.4.1) 的变更摘要。
@@ -14,17 +28,20 @@
 - **跨会话 WeCom 主动消息 sender 协议**: 为 `message.send` / `message.sendAttachment` 注入 `[[sender:...]]` 隐式头，并在 WS、Webhook、Agent API 出站时转成可见发送人前缀，避免子 Agent 主动触达其他会话时丢失发送者身份
 - **中文名目标寻址增强**: `resolveWecomTarget()` 支持将纯中文姓名转拼音 userId，并结合 `~/.openclaw/agents` 下已存在的动态 DM Agent 自动补全或纠正目标 userId
 - **动态 Agent 子会话投递钩子接入新版事件系统**: `subagent_delivery_target` / `subagent_spawned` / `subagent_ended` 改为通过 `api.on(...)` 注册，兼容新版 OpenClaw 生命周期
+- **新增 `stage_browser_media` 工具**: 将浏览器工具产出的 `~/.openclaw/media/browser/*` 文件复制到当前 workspace，并返回可直接用于最终回复的 `/workspace/...` 指令，绕开 core block reply 对宿主机浏览器路径的 sandbox 拦截
 
 ### Fixes
 
 - **WS 主动发送统一走 Markdown 载荷**: `sendWsMessage()` 统一发送 markdown body，减少结构化文本在主动消息中的降级
 - **账号启动保存 channel runtime**: `startAccount()` 显式缓存 `ctx.channelRuntime`，为新版 core 的 channel 运行时能力留出兼容入口
 - **新版状态摘要工具适配**: 账户状态摘要 helper 改从新版 SDK 子路径导入，避免 `2026.3.23-2` 上的运行时导出不匹配
+- **浏览器媒体回复引导修正**: WeCom reply guidance 和 README 明确要求先用 `stage_browser_media` 把浏览器宿主机路径转进 `/workspace/...`，避免模型直接回传 `media/browser` 绝对路径导致 block reply 媒体丢失
 
 ### Tests
 
 - 新增 `tests/outbound-sender-hook.test.js`、`tests/outbound-sender-protocol.test.js` 覆盖 sender 协议 hook 与协议转换
 - 扩展 `tests/target.test.js`、`tests/reply-media-directive.test.js`、`tests/ws.e2e.test.js`，覆盖中文名寻址、内联 WeCom 规则和 WS 主动发送行为
+- 新增 `tests/browser-media-tool.test.js` 覆盖浏览器媒体 staging 与安全校验
 
 ## 2.4.0 (2026-03-23)
 

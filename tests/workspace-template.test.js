@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { upsertAgentIdOnlyEntry, seedAgentWorkspace, clearTemplateMtimeCache } from "../wecom/workspace-template.js";
+import {
+  upsertAgentIdOnlyEntry,
+  seedAgentWorkspace,
+  clearTemplateMtimeCache,
+  resolveAgentWorkspaceDirLocal,
+} from "../wecom/workspace-template.js";
 
 describe("upsertAgentIdOnlyEntry", () => {
   it("adds heartbeat config when creating a dynamic agent entry", () => {
@@ -178,6 +183,23 @@ describe("seedAgentWorkspace", () => {
     assert.equal(readFileSync(dest, "utf8"), content);
   });
 
+  it("uses agents.defaults.workspace as the base for non-default agents", () => {
+    const configuredRoot = join(stateDir, "configured-workspaces");
+    const cfg = {
+      agents: {
+        defaults: { workspace: configuredRoot },
+        list: [{ id: "main" }, { id: "wecom-dm-testcfg" }],
+      },
+    };
+    writeFileSync(join(templateDir, "system-prompt.md"), "configured root");
+
+    seedAgentWorkspace("wecom-dm-testcfg", cfg, templateDir);
+
+    const dest = join(configuredRoot, "wecom-dm-testcfg", "system-prompt.md");
+    assert.equal(existsSync(dest), true);
+    assert.equal(readFileSync(dest, "utf8"), "configured root");
+  });
+
   it("copies IDENTITY.md alongside system-prompt.md", () => {
     writeFileSync(join(templateDir, "system-prompt.md"), "system prompt");
     writeFileSync(join(templateDir, "IDENTITY.md"), "identity");
@@ -282,5 +304,23 @@ describe("seedAgentWorkspace", () => {
 
     assert.equal(readFileSync(join(wsDir, "system-prompt.md"), "utf8"), "sp-updated");
     assert.equal(readFileSync(join(wsDir, "IDENTITY.md"), "utf8"), "id-user-edit");
+  });
+});
+
+describe("resolveAgentWorkspaceDirLocal", () => {
+  it("keeps legacy state-dir fallback when no default workspace is configured", () => {
+    const stateDir = process.env.OPENCLAW_STATE_DIR || join(process.env.HOME || "/root", ".openclaw");
+    const resolved = resolveAgentWorkspaceDirLocal("wecom-dm-test");
+    assert.equal(resolved, join(stateDir, "workspace-wecom-dm-test"));
+  });
+
+  it("matches openclaw core by nesting non-default agents under agents.defaults.workspace", () => {
+    const resolved = resolveAgentWorkspaceDirLocal("wecom-dm-lirui", {
+      agents: {
+        defaults: { workspace: "/data/openclaw/workspace" },
+        list: [{ id: "main" }, { id: "wecom-dm-lirui" }],
+      },
+    });
+    assert.equal(resolved, "/data/openclaw/workspace/wecom-dm-lirui");
   });
 });

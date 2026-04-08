@@ -7,6 +7,7 @@ import {
 } from "./wecom/channel-plugin.js";
 import { createWeComMcpTool } from "./wecom/mcp-tool.js";
 import { createImageStudioTool } from "./wecom/image-studio-tool.js";
+import { createStageBrowserMediaTool } from "./wecom/browser-media-tool.js";
 import { resolveQwenImageToolsConfig, wecomPluginConfigSchema } from "./wecom/plugin-config.js";
 import { setOpenclawConfig, setRuntime } from "./wecom/state.js";
 import { buildReplyMediaGuidance } from "./wecom/ws-monitor.js";
@@ -25,6 +26,7 @@ const plugin = {
     setOpenclawConfig(api.config);
     api.registerChannel({ plugin: wecomChannelPlugin });
     api.registerTool(createWeComMcpTool(), { name: "wecom_mcp" });
+    api.registerTool(createStageBrowserMediaTool(), { name: "stage_browser_media" });
 
     const qwenImageToolsConfig = resolveQwenImageToolsConfig(api.pluginConfig);
     if (qwenImageToolsConfig.enabled) {

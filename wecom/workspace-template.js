@@ -26,6 +26,20 @@ function expandTilde(p) {
   return join(homedir(), p.slice(1));
 }
 
+function normalizeAgentId(agentId) {
+  return String(agentId || "").trim() || "main";
+}
+
+function resolveDefaultAgentIdLocal(config) {
+  const list = Array.isArray(config?.agents?.list) ? config.agents.list.filter(Boolean) : [];
+  if (list.length === 0) {
+    return "main";
+  }
+
+  const defaults = list.filter((entry) => entry?.default);
+  return normalizeAgentId(defaults[0]?.id ?? list[0]?.id ?? "main");
+}
+
 // --- mtime caches for force-reseed ---
 const _templateMtimeCache = new Map();   // templateDir → { maxMtimeMs, checkedAt }
 const TEMPLATE_MTIME_CACHE_TTL_MS = 60_000;
@@ -59,14 +73,31 @@ export function clearTemplateMtimeCache({ agentSeedCache = true } = {}) {
 
 /**
  * Resolve the agent workspace directory for a given agentId.
- * Mirrors openclaw core's resolveAgentWorkspaceDir logic for non-default agents:
- *   stateDir/workspace-{agentId}
+ * Mirrors openclaw core's resolveAgentWorkspaceDir logic, including
+ * agents.defaults.workspace as the base directory for non-default agents.
  */
-export function resolveAgentWorkspaceDirLocal(agentId) {
+export function resolveAgentWorkspaceDirLocal(agentId, config = {}) {
+  const normalizedAgentId = normalizeAgentId(agentId);
+  const list = Array.isArray(config?.agents?.list) ? config.agents.list.filter(Boolean) : [];
+  const agentEntry = list.find((entry) => normalizeAgentId(entry?.id) === normalizedAgentId);
+  const configuredWorkspace = String(agentEntry?.workspace ?? "").trim();
+  if (configuredWorkspace) {
+    return expandTilde(configuredWorkspace);
+  }
+
   const stateDir =
     process.env.OPENCLAW_STATE_DIR?.trim() ||
     join(process.env.HOME || "/root", ".openclaw");
-  return join(stateDir, `workspace-${agentId}`);
+  const defaultWorkspace = String(config?.agents?.defaults?.workspace ?? "").trim();
+  if (normalizedAgentId === resolveDefaultAgentIdLocal(config)) {
+    return defaultWorkspace ? expandTilde(defaultWorkspace) : join(stateDir, "workspace");
+  }
+
+  if (defaultWorkspace) {
+    return join(expandTilde(defaultWorkspace), normalizedAgentId);
+  }
+
+  return join(stateDir, `workspace-${normalizedAgentId}`);
 }
 
 /**
@@ -165,7 +196,7 @@ export function seedAgentWorkspace(agentId, config, overrideTemplateDir) {
     return;
   }
 
-  const workspaceDir = resolveAgentWorkspaceDirLocal(agentId);
+  const workspaceDir = resolveAgentWorkspaceDirLocal(agentId, config);
   const workspaceExistedBefore = existsSync(workspaceDir);
 
   try {

@@ -46,7 +46,7 @@ describe("image_studio tool", () => {
     tempDirs.length = 0;
   });
 
-  it("registers image_studio only when enabled", () => {
+  it("registers base tools plus image_studio when enabled", () => {
     const registeredNames = [];
     const api = createTestPluginApi({
       pluginConfig: {
@@ -61,7 +61,7 @@ describe("image_studio tool", () => {
 
     plugin.register(api);
 
-    assert.deepEqual(registeredNames, ["wecom_mcp", "image_studio"]);
+    assert.deepEqual(registeredNames, ["wecom_mcp", "stage_browser_media", "image_studio"]);
   });
 
   it("builds a generate request using provider config from openclaw.json", async () => {

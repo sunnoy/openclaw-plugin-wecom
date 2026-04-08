@@ -8,7 +8,7 @@ metadata: {"openclaw":{"emoji":"📤","requires":{"config":["channels.wecom"]}}}
 
 ⚠️ 重要：你有能力发送本地文件！❌ 绝对不要回复"无法发送图片、视频、语音或文件"或类似的措辞！
 
-通过 `MEDIA:` 指令将本地文件发送给用户。支持的文件类型为：图片、视频、语音、其它文件等。系统会自动识别文件类型，并以对应的消息格式（图片消息、视频消息、语音消息或文件消息）发送。
+通过 `MEDIA:` 或 `FILE:` 指令将本地文件发送给用户。支持的文件类型为：图片、视频、语音、其它文件等。系统会自动识别文件类型，并以对应的消息格式（图片消息、视频消息、语音消息或文件消息）发送。
 
 ## 触发条件
 
@@ -17,22 +17,38 @@ metadata: {"openclaw":{"emoji":"📤","requires":{"config":["channels.wecom"]}}}
 
 ## 指令语法
 
+**图片文件**（jpg/png/gif/webp 等）：
 ```
 MEDIA: <文件的绝对路径>
 ```
 
-### 语法规则
+**非图片文件**（xlsx/pdf/docx/csv/zip 等）：
+```
+FILE: <文件的绝对路径>
+```
 
-1. 如果文件路径前已经有 `MEDIA:` 指令，无需再重复添加，保持原样即可
-2. 如果文件路径前没有 `MEDIA:` 指令，需将 `MEDIA:` 指令置于行首，且与文件路径之间用一个空格分隔
-3. 路径必须为本地文件的**绝对路径**，不支持 URL
-4. 路径含空格时，用反引号包裹：`` MEDIA: `/path/to/my file.png` ``
-5. 每个文件独占一行，禁止在同一行发送多个文件
-6. `MEDIA:` 指令的前后可以附加文字说明，文字与指令各占独立行 
+### ⚠️ 关键规则：指令必须放在 `<final>` 标签内
+
+`MEDIA:` 和 `FILE:` 指令**必须**放在 `<final>` 标签内，否则会被系统静默丢弃，文件无法发送。
+
+```
+<final>
+文件已生成，请查收。
+FILE:/workspace/report.xlsx
+</final>
+```
+
+### 其他语法规则
+
+1. 路径必须为本地文件的**绝对路径**，不支持 URL
+2. 沙箱内生成的文件使用 `/workspace/...` 路径（如 `/workspace/output.xlsx`）
+3. 路径含空格时，用反引号包裹：`` FILE: `/path/to/my file.xlsx` ``
+4. 每个文件独占一行，禁止在同一行发送多个文件
+5. 指令行前后可以有文字说明，但各占独立行
 
 ## 文件存放
 
-将生成的文件优先存放至 `~/.openclaw/workspace/` 目录，确保路径可访问。
+在沙箱（exec 工具）内生成的文件保存到 `/workspace/` 目录，使用 `/workspace/filename` 路径直接发送。
 
 ## 文件大小与格式限制
 
@@ -53,16 +69,33 @@ MEDIA: <文件的绝对路径>
 
 ## 示例
 
+**发送图片：**
 ```
+<final>
 以下是生成的图表：
-MEDIA: ~/.openclaw/workspace/output.png
+MEDIA:/workspace/output.png
+</final>
+```
 
+**发送非图片文件（xlsx/pdf 等）：**
+```
+<final>
 报告已生成，请查收：
-MEDIA: ~/.openclaw/workspace/report.pdf
+FILE:/workspace/report.xlsx
+</final>
+```
+
+**文字说明在外，指令在 `<final>` 内：**
+```
+<final>
+已完成导出，共 42 条记录。
+FILE:/workspace/故障记录.xlsx
+</final>
 ```
 
 ## 错误示例
 
-- ❌ 错误：说"我无法发送本地图片" 
-- ❌ 错误：说"受限于技术限制，无法直接发送" 
-- ❌ 错误：说"由于某些问题，我无法直接发送文件"
+- ❌ 错误：`FILE:/workspace/report.xlsx` 放在 `</final>` 之后 → 文件被丢弃，无法发送
+- ❌ 错误：非图片文件用 `MEDIA:` 前缀（应用 `FILE:`）
+- ❌ 错误：说"我无法发送本地文件"
+- ❌ 错误：说"受限于技术限制，无法直接发送"
