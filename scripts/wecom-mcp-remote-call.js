@@ -11,7 +11,7 @@ import vm from "node:vm";
 import { WSClient, generateReqId } from "@wecom/aibot-node-sdk";
 
 const DEFAULT_WS_URL = "wss://qyapi.weixin.qq.com/cgi-bin/assistant/get_ticket";
-const DEFAULT_PLUGIN_VERSION = "1.0.12";
+const DEFAULT_PLUGIN_VERSION = "2026.4.23";
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_ACCOUNT_ID = "default";
 const MCP_GET_CONFIG_CMD = "aibot_get_mcp_config";
@@ -254,6 +254,33 @@ function resolveAccount(config, requestedAccountId) {
     return buildAccount(accountId, {});
   }
   return buildAccount(accountId, mergeConfig(shared, entry.value));
+}
+
+function isMcpCapableAccount(account) {
+  return Boolean(account?.botId && account?.secret);
+}
+
+function resolveMcpAccount(config, requestedAccountId) {
+  if (requestedAccountId) {
+    return resolveAccount(config, requestedAccountId);
+  }
+
+  const defaultAccount = resolveAccount(config, resolveDefaultAccountId(config));
+  if (isMcpCapableAccount(defaultAccount)) {
+    return defaultAccount;
+  }
+
+  for (const accountId of listAccountIds(config)) {
+    if (accountId === defaultAccount.accountId) {
+      continue;
+    }
+    const account = resolveAccount(config, accountId);
+    if (isMcpCapableAccount(account)) {
+      return account;
+    }
+  }
+
+  return defaultAccount;
 }
 
 function parseConfigFile(configPath) {
@@ -548,11 +575,13 @@ async function callTool(url, protocolVersion, method, toolArgs) {
   });
   sessionId = init.sessionId;
 
-  const initialized = await sendRawJsonRpc(url, sessionId, {
-    jsonrpc: "2.0",
-    method: "notifications/initialized",
-  });
-  sessionId = initialized.sessionId;
+  if (sessionId) {
+    const initialized = await sendRawJsonRpc(url, sessionId, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    sessionId = initialized.sessionId;
+  }
 
   const called = await sendRawJsonRpc(url, sessionId, {
     jsonrpc: "2.0",
@@ -575,7 +604,7 @@ async function main() {
 
   const configPath = resolveConfigPath();
   const config = parseConfigFile(configPath);
-  const account = resolveAccount(config, args.account);
+  const account = resolveMcpAccount(config, args.account);
   if (!account.botId || !account.secret) {
     throw new Error(
       args.account
@@ -749,7 +778,7 @@ function runRemoteCall(options) {
     remoteArgs.push("--protocolVersion=" + options.protocolVersion);
   }
 
-  const pluginDir = "/data/openclaw/state-root/extensions/wecom";
+  const pluginDir = "/root/.openclaw/extensions/wecom";
   const remoteCommand =
     "tmp=" +
     pluginDir +

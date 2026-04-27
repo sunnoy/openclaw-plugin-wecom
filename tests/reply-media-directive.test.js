@@ -132,8 +132,8 @@ describe("buildReplyMediaGuidance", () => {
     assert.ok(guidance.includes("[WeCom cross-chat send rule]"));
     assert.ok(guidance.includes("MEDIA:/abs/path"));
     assert.ok(guidance.includes("FILE:/abs/path"));
-    assert.ok(guidance.includes("Do NOT call message.send"));
-    assert.ok(guidance.includes("message.sendAttachment"));
+    assert.ok(guidance.includes("Do NOT use the message tool"));
+    assert.ok(guidance.includes('action="sendAttachment"'));
     assert.ok(guidance.includes("PDF must always use FILE:"));
     assert.ok(guidance.includes("/workspace"));
     assert.ok(guidance.includes("SKILL.md"));

@@ -63,9 +63,7 @@
 
 ### 7. 成员 (USER)
 
-数组格式，需传 user_id。**user_id 不是姓名**，必须先通过 `wecom-contact-lookup` 技能查找目标人员的 `userid`，再填入此处。
-
-具体步骤：先使用 `wecom_mcp` tool 调用 `wecom_mcp call contact get_userlist '{}'` 获取通讯录成员列表，在返回结果中按姓名/别名筛选出目标人员，取其 `userid` 值填入。
+数组格式，需传 user_id。**user_id 不是姓名**。当前 bot 未开通 `contact` 类 MCP 能力，不能通过姓名查询 `userid`；用户未提供明确 `user_id` 时不要写入成员字段。
 
 ```json
 "负责人": [{"user_id": "zhangsan"}]

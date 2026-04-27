@@ -29,7 +29,7 @@ import { MessageDeduplicator, splitTextByByteLimit } from "../utils.js";
 import { recordInboundMessage, recordOutboundActivity } from "./runtime-telemetry.js";
 import { setConfigProxyUrl } from "./http.js";
 import { setApiBaseUrl } from "./constants.js";
-import { dispatchLocks, streamContext } from "./state.js";
+import { dispatchLocks, setSessionChatInfo, streamContext } from "./state.js";
 import {
   CHANNEL_ID,
   CALLBACK_INBOUND_MAX_BODY_BYTES,
@@ -370,6 +370,10 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
     isGroupChat,
   });
   ctxPayload.CommandAuthorized = commandAuthorized;
+  setSessionChatInfo(ctxPayload.SessionKey ?? route.sessionKey, {
+    chatId,
+    chatType: isGroupChat ? "group" : "single",
+  });
 
   await ensureDefaultSessionReasoningLevel({
     core,

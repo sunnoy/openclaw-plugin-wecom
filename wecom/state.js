@@ -8,7 +8,10 @@ const runtimeState = {
   channelRuntime: null,
   ensuredDynamicAgentIds: new Set(),
   ensureDynamicAgentWriteQueue: Promise.resolve(),
+  sessionChatInfo: new Map(),
 };
+
+const SESSION_CHAT_INFO_MAX_SIZE = 5000;
 
 export const dispatchLocks = new Map();
 export const streamContext = new AsyncLocalStorage();
@@ -52,6 +55,43 @@ export function setEnsureDynamicAgentWriteQueue(queuePromise) {
   runtimeState.ensureDynamicAgentWriteQueue = queuePromise;
 }
 
+function normalizeSessionKey(sessionKey) {
+  return String(sessionKey ?? "").trim();
+}
+
+export function setSessionChatInfo(sessionKey, info) {
+  const key = normalizeSessionKey(sessionKey);
+  if (!key) {
+    return;
+  }
+  if (runtimeState.sessionChatInfo.size >= SESSION_CHAT_INFO_MAX_SIZE && !runtimeState.sessionChatInfo.has(key)) {
+    const oldestKey = runtimeState.sessionChatInfo.keys().next().value;
+    if (oldestKey !== undefined) {
+      runtimeState.sessionChatInfo.delete(oldestKey);
+    }
+  }
+  runtimeState.sessionChatInfo.set(key, {
+    chatId: String(info?.chatId ?? "").trim(),
+    chatType: info?.chatType === "group" ? "group" : info?.chatType === "single" ? "single" : undefined,
+  });
+}
+
+export function getSessionChatInfo(sessionKey) {
+  const key = normalizeSessionKey(sessionKey);
+  if (!key) {
+    return undefined;
+  }
+  return runtimeState.sessionChatInfo.get(key);
+}
+
+export function deleteSessionChatInfo(sessionKey) {
+  const key = normalizeSessionKey(sessionKey);
+  if (!key) {
+    return;
+  }
+  runtimeState.sessionChatInfo.delete(key);
+}
+
 function resolveEffectiveAccountId(accountId) {
   if (accountId) {
     return accountId;
@@ -89,5 +129,6 @@ export function resetStateForTesting() {
   runtimeState.channelRuntime = null;
   runtimeState.ensuredDynamicAgentIds = new Set();
   runtimeState.ensureDynamicAgentWriteQueue = Promise.resolve();
+  runtimeState.sessionChatInfo = new Map();
   dispatchLocks.clear();
 }

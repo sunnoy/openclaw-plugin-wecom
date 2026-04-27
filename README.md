@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@sunnoy/wecom)](https://www.npmjs.com/package/@sunnoy/wecom)
 [![license](https://img.shields.io/npm/l/@sunnoy/wecom)](LICENSE)
 
-`@sunnoy/wecom` 是 [OpenClaw](https://github.com/openclaw/openclaw) 企业微信渠道的**社区增强插件**，基于官方 [`@wecom/wecom-openclaw-plugin`](https://github.com/WecomTeam/wecom-openclaw-plugin) 的 WebSocket 长连接骨架，提供多账号管理、动态 Agent 隔离、Agent API / Webhook 增强出站、指令白名单、配额感知等企业级特性。
+`@sunnoy/wecom` 是 [OpenClaw](https://github.com/openclaw/openclaw) 企业微信渠道的**社区增强插件**，基于官方 [`@wecom/wecom-openclaw-plugin`](https://github.com/WecomTeam/wecom-openclaw-plugin) 的 WebSocket 长连接骨架，提供多账号管理、动态 Agent 隔离、Agent API / Webhook 增强出站、企业微信 MCP 文档/智能表格能力、指令白名单、配额感知等企业级特性。
 
 底层 SDK：[`@wecom/aibot-node-sdk`](https://github.com/WecomTeam/aibot-node-sdk) — 企业微信智能机器人 Node.js SDK。
 
@@ -47,6 +47,9 @@
 | **自建应用回调入站**（HTTP 回调作为独立入站通道，与 WS 并行） | ❌ | ✅ |
 | **Agent API Markdown 回复**（回调入站回复默认 markdown 格式） | ❌ | ✅ |
 | **入站/出站信息日志**（WS / CB 收发日志，便于追踪消息流） | ❌ | ✅ |
+| **官方 MCP 2026.4.23 对齐**（doc auth、SmartPage、媒体拦截器） | ✅ | ✅ |
+| **MCP 多账号 fallback**（默认账号非长连接时自动选择可用 Bot） | ❌ | ✅ |
+| **MCP doc-only Skills 部署约束**（避免误用 contact/todo/msg 等未开通能力） | ❌ | ✅ |
 
 ## 目录
 
@@ -59,6 +62,7 @@
 - [私聊与群聊准入策略](#私聊与群聊准入策略)
 - [企业微信侧配置](#企业微信侧配置)
 - [消息能力与投递策略](#消息能力与投递策略)
+- [企业微信 MCP 文档与智能表格](#企业微信-mcp-文档与智能表格)
 - [动态 Agent 与路由](#动态-agent-与路由)
 - [自建应用回调入站](#自建应用回调入站)
 - [常见问题](#常见问题)
@@ -85,6 +89,8 @@ openclaw plugins install @sunnoy/wecom
 ```
 
 > **3.0 兼容性说明：** 从 `3.0.0` 开始，本插件仅支持 OpenClaw `2026.3.23-2+`。旧版 OpenClaw 请继续使用 `2.x`。
+
+> **3.1 MCP 说明：** `wecom_mcp` 已按官方 `@wecom/wecom-openclaw-plugin@2026.4.23` 协商版本与 `@wecom/aibot-node-sdk@1.0.6` 对齐。企业规模和机器人权限仍由企业微信后端控制；当前大型企业常见只开放 `doc` 类 MCP 能力。
 
 > **从官方插件迁移：** 如果之前使用 `openclaw plugins install @wecom/wecom-openclaw-plugin`，请先卸载官方插件再安装本插件。`channels.wecom` 配置字段兼容，无需修改。
 
@@ -431,6 +437,36 @@ Webhook 只负责群通知。
 | `webhook:<name>` | `webhook:ops` | 发给 webhook 群 |
 | `<chatId>` | `wr123456` | 直接写群 ID 也可识别 |
 
+## 企业微信 MCP 文档与智能表格
+
+`wecom_mcp` 通过企业微信官方 MCP Server 调用文档和智能表格能力。本插件默认使用官方协商版本 `2026.4.23`，并保留社区增强：
+
+- 自动透传当前企业微信发送人的 `userid`，用于 MCP 后端做用户级鉴权
+- 保留原始大小写 `chatId/chatType`，文档权限错误时可发送企业微信授权卡片
+- `smartpage_create` 支持 `page_filepath`，调用前读取本地 Markdown 文件并填入 `page_content`
+- `smartpage_get_export_result` 会把大段 Markdown `content` 保存为本地文件，返回 `content_path`
+- `get_msg_media` 会把 base64 媒体保存为本地文件，避免把大文件塞进模型上下文
+- 默认账号不是长连接机器人时，自动回退到第一个配置了 `botId/secret` 的账号获取 MCP 配置
+
+推荐只部署当前机器人实际开通的 doc 类 skills：
+
+- `wecom-preflight`
+- `wecom-doc-manager`
+- `wecom-smartsheet-schema`
+- `wecom-smartsheet-data`
+
+如果企业微信返回 `errcode: 846609` / `unsupported mcp biz type`，表示当前机器人未开通对应 MCP category。不要改用其他 category 或反复探路。
+
+如果返回 `forbidden for current apikey`，表示企业微信 MCP 后端拒绝当前机器人/apikey 访问目标文档或智能表格。插件无法绕过该限制，需要在企业微信侧给机器人或当前用户开通访问权限，或改用机器人可访问的文档/智能表格链接。
+
+从源码仓库同步到自管 OpenClaw 主机时，可参考运维脚本：
+
+```bash
+scripts/install-plugin.sh
+```
+
+该脚本会把插件代码同步到远端插件目录、在远端执行 `npm ci --omit=dev`、只同步 doc 相关 WeCom skills、清空插件本地 `skills/`，并保持远端文件 ownership 为 `root:root`。脚本默认参数面向本仓库的自管部署环境，其他环境请按实际主机和目录传入参数。
+
 ## 动态 Agent 与路由
 
 ### 动态 Agent
@@ -626,6 +662,7 @@ openclaw-plugin-wecom/
 │   ├── dm-policy.js              # 私聊准入策略
 │   ├── group-policy.js           # 群聊准入策略
 │   ├── http.js                   # HTTP 请求 + 代理
+│   ├── mcp-tool.js               # 企业微信 MCP Streamable HTTP 调用与拦截器
 │   ├── onboarding.js             # CLI 交互式配置向导
 │   ├── runtime-telemetry.js      # 运行时配额追踪
 │   ├── sandbox.js                # 沙箱集成
@@ -645,6 +682,7 @@ openclaw-plugin-wecom/
     ├── dynamic-agent.test.js
     ├── image-processor.test.js
     ├── issue-fixes.test.js
+    ├── mcp-tool.test.js
     ├── reply-media-directive.test.js
     ├── runtime-telemetry.test.js
     ├── target.test.js

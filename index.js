@@ -9,7 +9,7 @@ import { createWeComMcpTool } from "./wecom/mcp-tool.js";
 import { createImageStudioTool } from "./wecom/image-studio-tool.js";
 import { createStageBrowserMediaTool } from "./wecom/browser-media-tool.js";
 import { resolveQwenImageToolsConfig, wecomPluginConfigSchema } from "./wecom/plugin-config.js";
-import { setOpenclawConfig, setRuntime } from "./wecom/state.js";
+import { getSessionChatInfo, setOpenclawConfig, setRuntime } from "./wecom/state.js";
 import { buildReplyMediaGuidance } from "./wecom/ws-monitor.js";
 import { listAccountIds, resolveAccount } from "./wecom/accounts.js";
 import { createCallbackHandler } from "./wecom/callback-inbound.js";
@@ -25,7 +25,18 @@ const plugin = {
     setRuntime(api.runtime);
     setOpenclawConfig(api.config);
     api.registerChannel({ plugin: wecomChannelPlugin });
-    api.registerTool(createWeComMcpTool(), { name: "wecom_mcp" });
+    api.registerTool((ctx = {}) => {
+      const messageChannel = ctx.messageChannel ?? ctx.channelId;
+      const requesterUserId =
+        messageChannel === "wecom" ? String(ctx.requesterSenderId ?? "").trim() || undefined : undefined;
+      const sessionChat = getSessionChatInfo(ctx.sessionKey);
+      return createWeComMcpTool({
+        requesterUserId,
+        accountId: ctx.agentAccountId,
+        chatId: sessionChat?.chatId,
+        chatType: sessionChat?.chatType,
+      });
+    }, { name: "wecom_mcp" });
     api.registerTool(createStageBrowserMediaTool(), { name: "stage_browser_media" });
 
     const qwenImageToolsConfig = resolveQwenImageToolsConfig(api.pluginConfig);

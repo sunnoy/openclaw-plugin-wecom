@@ -1,12 +1,13 @@
 ---
 name: wecom-preflight
-description: 企业微信 MCP 调用前置检查。用于 sandbox 场景下确认是否可以直接继续调用 `wecom_mcp`，并在工具未放行或宿主未完成配置时给出正确的人工处理指引。不要在 agent sandbox 内执行 `openclaw config` 或 `openclaw gateway restart`。
+description: WeCom MCP 文档/智能表格调用前置检查。仅当已经决定调用 `wecom_mcp` 的 doc 类能力时使用；不要用于给企业微信用户或群发消息、联系人查询、日程、会议或待办。发消息必须使用 OpenClaw core `message` 工具。
 ---
 
 # 企业微信前置检查
 
 > 本技能只用于判断当前会话能否继续使用 `wecom_mcp`。
 > 在 agent sandbox 内，**不要**执行宿主机级别的 `openclaw config ...` 或 `openclaw gateway restart`。
+> 本技能**不适用于发消息**。用户要求“给某人/群发消息、转发、通知”时，禁止调用 `wecom_mcp` 的 `msg` category；应使用 OpenClaw core `message` 工具（`action="send"`、`channel="wecom"`）。如果当前工具列表没有 `message`，直接说明宿主机需要把 `message` 加入 `tools.alsoAllow`，不要改用 `wecom_mcp`。
 
 > ⚠️ **路径与停止规则**：
 > - 如果要读取 WeCom skill，必须直接使用 `<available_skills>` 或 `skillsSnapshot` 中给出的精确绝对路径。

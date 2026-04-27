@@ -2,9 +2,154 @@
   "id": "wecom",
   "name": "OpenClaw WeCom",
   "description": "Enterprise WeChat (WeCom) messaging channel plugin for OpenClaw",
+  "kind": "channel",
+  "channels": [
+    "wecom"
+  ],
   "skills": [
     "./skills"
   ],
+  "channelConfigs": {
+    "wecom": {
+      "label": "Enterprise WeChat",
+      "description": "Enterprise WeChat AI Bot over WebSocket.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "defaultAccount": {
+            "type": "string"
+          },
+          "botId": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "websocketUrl": {
+            "type": "string"
+          },
+          "sendThinkingMessage": {
+            "type": "boolean"
+          },
+          "welcomeMessage": {
+            "type": "string"
+          },
+          "welcomeMessagesFile": {
+            "type": "string"
+          },
+          "dmPolicy": {
+            "enum": [
+              "pairing",
+              "allowlist",
+              "open",
+              "disabled"
+            ]
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groupPolicy": {
+            "enum": [
+              "open",
+              "allowlist",
+              "disabled"
+            ]
+          },
+          "groupAllowFrom": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deliveryMode": {
+            "enum": [
+              "direct",
+              "gateway"
+            ]
+          },
+          "mediaLocalRoots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "agent": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "replyFormat": {
+                "enum": [
+                  "text",
+                  "markdown"
+                ]
+              },
+              "callback": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "encodingAESKey": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "uiHints": {
+        "botId": {
+          "label": "Bot ID"
+        },
+        "secret": {
+          "label": "Secret",
+          "sensitive": true
+        },
+        "websocketUrl": {
+          "label": "WebSocket URL",
+          "placeholder": "wss://openws.work.weixin.qq.com"
+        },
+        "welcomeMessage": {
+          "label": "Welcome Message"
+        },
+        "welcomeMessagesFile": {
+          "label": "Welcome Messages File",
+          "placeholder": "welcome-messages.json"
+        },
+        "agent.corpSecret": {
+          "label": "Application Secret",
+          "sensitive": true
+        },
+        "agent.replyFormat": {
+          "label": "Reply Format",
+          "placeholder": "text"
+        },
+        "agent.callback.token": {
+          "label": "Callback Token"
+        },
+        "agent.callback.encodingAESKey": {
+          "label": "Callback Encoding AES Key",
+          "sensitive": true
+        },
+        "agent.callback.path": {
+          "label": "Callback Path",
+          "placeholder": "/api/channels/wecom/callback"
+        }
+      }
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": true,
@@ -145,8 +290,5 @@
         }
       }
     }
-  },
-  "channels": [
-    "wecom"
-  ]
+  }
 }

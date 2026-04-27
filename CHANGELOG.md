@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.1.0 (2026-04-27)
+
+相对 [v3.0.1](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v3.0.1) 的变更摘要。
+
+### Features
+
+- **官方 WeCom MCP 2026.4.23 对齐**: `wecom_mcp` 协商版本升级到官方 `2026.4.23`，SDK 升级到 `@wecom/aibot-node-sdk@1.0.6`
+- **MCP 上下文透传**: 工具工厂透传可信 `requesterUserId`、`agentAccountId`、原始大小写 `chatId/chatType`，文档授权错误时可通过 `aibot_send_biz_msg` 发送授权卡片
+- **MCP 拦截器增强**: 支持 SmartPage `page_filepath` 读取、SmartPage 导出内容落本地文件、`get_msg_media` base64 媒体落本地文件、业务错误码触发缓存清理
+- **MCP 多账号 fallback**: 默认账号非长连接机器人时，自动选择第一个配置了 `botId/secret` 的账号获取 MCP 配置
+- **doc-only skills 部署收敛**: 移除当前企业未开通的 contact/todo/meeting/schedule/msg/send-media skills，保留 doc、smart sheet 和 preflight 相关 skills
+- **ali-ai 安装脚本**: 新增 `scripts/install-plugin.sh`，同步插件代码与共享 skills、远端执行 `npm ci --omit=dev`、保持 `root:root` ownership 并重启校验 gateway
+
+### Docs
+
+- README 增加企业微信 MCP 文档与智能表格说明，明确 `forbidden for current apikey` 属于企业微信后端权限拒绝，需要企业微信侧授权
+- 更新 MCP 远程探测脚本默认版本与远端插件路径，避免继续使用旧 `plugin_version=1.0.12`
+
+### Tests
+
+- 扩展 `tests/mcp-tool.test.js`，覆盖官方协商版本、请求人 header、文档授权卡片、SmartPage 文件读取/导出、本地 session chat 信息容量控制、多账号 MCP fallback
+- 本地全量测试通过：`287 pass / 0 fail`
+
 ## 3.0.1 (2026-04-08)
 
 相对 [v3.0.0](https://github.com/sunnoy/openclaw-plugin-wecom/releases/tag/v3.0.0) 的变更摘要。

@@ -1,17 +1,31 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { generateReqId } from "@wecom/aibot-node-sdk";
 import { logger } from "../logger.js";
-import { resolveDefaultAccountId } from "./accounts.js";
-import { getOpenclawConfig, streamContext } from "./state.js";
+import { listAccountIds, resolveAccount, resolveDefaultAccountId } from "./accounts.js";
+import { detectMime } from "./openclaw-compat.js";
+import { getOpenclawConfig, getRuntime, streamContext } from "./state.js";
 import { getWsClient } from "./ws-state.js";
 
 const MCP_GET_CONFIG_CMD = "aibot_get_mcp_config";
+const AIBOT_SEND_BIZ_MSG_CMD = "aibot_send_biz_msg";
 const MCP_CONFIG_FETCH_TIMEOUT_MS = 15_000;
 const HTTP_REQUEST_TIMEOUT_MS = 30_000;
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 120_000;
+const BIZ_MSG_SEND_TIMEOUT_MS = 10_000;
 const UNSUPPORTED_BIZ_TYPE_ERRCODE = 846609;
-const PLUGIN_VERSION = "1.0.12";
+const OFFICIAL_WECOM_PLUGIN_VERSION = "2026.4.23";
+const WECOM_USERID_HEADER = "x-openclaw-wecom-userid";
+const DOC_AUTH_ERROR_CODES = new Set([851013, 851014, 851008]);
+const DOC_AUTH_BIZ_TYPE = 1;
+const DOC_AUTH_CHAT_TYPE_SINGLE = 1;
+const DOC_AUTH_CHAT_TYPE_GROUP = 2;
+const SMARTPAGE_CREATE_SINGLE_FILE_MAX_BYTES = 10 * 1024 * 1024;
+const SMARTPAGE_CREATE_TOTAL_FILE_MAX_BYTES = 20 * 1024 * 1024;
+const INBOUND_MCP_MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 
 const CACHE_CLEAR_ERROR_CODES = new Set([-32001, -32002, -32003]);
-const BIZ_CACHE_CLEAR_ERROR_CODES = new Set([850002]);
+const BIZ_CACHE_CLEAR_ERROR_CODES = new Set([850001, 850002, 851014]);
 const GEMINI_UNSUPPORTED_KEYWORDS = new Set([
   "patternProperties",
   "additionalProperties",
@@ -132,7 +146,30 @@ function resolveCurrentAccountId() {
   if (contextualAccountId) {
     return contextualAccountId;
   }
-  return resolveDefaultAccountId(getOpenclawConfig());
+
+  const cfg = getOpenclawConfig();
+  const defaultAccountId = resolveDefaultAccountId(cfg);
+  if (isMcpCapableAccount(cfg, defaultAccountId)) {
+    return defaultAccountId;
+  }
+
+  for (const accountId of listAccountIds(cfg)) {
+    if (accountId !== defaultAccountId && isMcpCapableAccount(cfg, accountId)) {
+      return accountId;
+    }
+  }
+
+  return defaultAccountId;
+}
+
+function isMcpCapableAccount(cfg, accountId) {
+  const account = resolveAccount(cfg, accountId);
+  return Boolean(account?.enabled !== false && account?.configured);
+}
+
+function normalizeOptionalString(value) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed || undefined;
 }
 
 function getConnectedWsClient(accountId) {
@@ -149,7 +186,7 @@ async function fetchMcpConfig(accountId, category) {
   const response = await withTimeout(
     wsClient.reply(
       { headers: { req_id: reqId } },
-      { biz_type: category, plugin_version: PLUGIN_VERSION },
+      { biz_type: category, plugin_version: OFFICIAL_WECOM_PLUGIN_VERSION },
       MCP_GET_CONFIG_CMD,
     ),
     MCP_CONFIG_FETCH_TIMEOUT_MS,
@@ -189,9 +226,10 @@ async function getMcpUrl(accountId, category) {
   return config.url;
 }
 
-async function sendRawJsonRpc(url, session, body) {
+async function sendRawJsonRpc(url, session, body, options = {}) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), HTTP_REQUEST_TIMEOUT_MS);
+  const timeoutMs = options.timeoutMs ?? HTTP_REQUEST_TIMEOUT_MS;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const headers = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
@@ -199,6 +237,10 @@ async function sendRawJsonRpc(url, session, body) {
 
   if (session.sessionId) {
     headers["Mcp-Session-Id"] = session.sessionId;
+  }
+  const requesterUserId = String(options.requesterUserId ?? "").trim();
+  if (requesterUserId) {
+    headers[WECOM_USERID_HEADER] = requesterUserId;
   }
 
   let response;
@@ -211,7 +253,7 @@ async function sendRawJsonRpc(url, session, body) {
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error(`MCP request timed out after ${HTTP_REQUEST_TIMEOUT_MS}ms`);
+      throw new Error(`MCP request timed out after ${timeoutMs}ms`);
     }
     throw new Error(`MCP network request failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -249,7 +291,7 @@ async function sendRawJsonRpc(url, session, body) {
   return { rpcResult: rpc.result, newSessionId };
 }
 
-async function initializeSession(accountId, category, url) {
+async function initializeSession(accountId, category, url, options = {}) {
   const session = { sessionId: null, initialized: false, stateless: false };
   const initializeBody = {
     jsonrpc: "2.0",
@@ -262,7 +304,7 @@ async function initializeSession(accountId, category, url) {
     },
   };
 
-  const { newSessionId: initSessionId } = await sendRawJsonRpc(url, session, initializeBody);
+  const { newSessionId: initSessionId } = await sendRawJsonRpc(url, session, initializeBody, options);
   if (initSessionId) {
     session.sessionId = initSessionId;
   }
@@ -276,10 +318,15 @@ async function initializeSession(accountId, category, url) {
     return session;
   }
 
-  const { newSessionId: notifySessionId } = await sendRawJsonRpc(url, session, {
-    jsonrpc: "2.0",
-    method: "notifications/initialized",
-  });
+  const { newSessionId: notifySessionId } = await sendRawJsonRpc(
+    url,
+    session,
+    {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    },
+    options,
+  );
 
   if (notifySessionId) {
     session.sessionId = notifySessionId;
@@ -290,7 +337,7 @@ async function initializeSession(accountId, category, url) {
   return session;
 }
 
-async function getOrCreateSession(accountId, category, url) {
+async function getOrCreateSession(accountId, category, url, options = {}) {
   const key = buildCacheKey(accountId, category);
   if (statelessSessions.has(key)) {
     const cached = mcpSessionCache.get(key);
@@ -309,21 +356,21 @@ async function getOrCreateSession(accountId, category, url) {
     return inflight;
   }
 
-  const request = initializeSession(accountId, category, url).finally(() => {
+  const request = initializeSession(accountId, category, url, options).finally(() => {
     inflightInitRequests.delete(key);
   });
   inflightInitRequests.set(key, request);
   return request;
 }
 
-async function rebuildSession(accountId, category, url) {
+async function rebuildSession(accountId, category, url, options = {}) {
   const key = buildCacheKey(accountId, category);
   const inflight = inflightInitRequests.get(key);
   if (inflight) {
     return inflight;
   }
 
-  const request = initializeSession(accountId, category, url).finally(() => {
+  const request = initializeSession(accountId, category, url, options).finally(() => {
     inflightInitRequests.delete(key);
   });
   inflightInitRequests.set(key, request);
@@ -338,7 +385,7 @@ function clearCategoryCache(accountId, category) {
   inflightInitRequests.delete(key);
 }
 
-async function sendJsonRpc(accountId, category, method, params) {
+async function sendJsonRpc(accountId, category, method, params, options = {}) {
   const url = await getMcpUrl(accountId, category);
   const body = {
     jsonrpc: "2.0",
@@ -347,9 +394,9 @@ async function sendJsonRpc(accountId, category, method, params) {
     ...(params !== undefined ? { params } : {}),
   };
 
-  let session = await getOrCreateSession(accountId, category, url);
+  let session = await getOrCreateSession(accountId, category, url, options);
   try {
-    const { rpcResult, newSessionId } = await sendRawJsonRpc(url, session, body);
+    const { rpcResult, newSessionId } = await sendRawJsonRpc(url, session, body, options);
     if (newSessionId) {
       session.sessionId = newSessionId;
     }
@@ -366,8 +413,8 @@ async function sendJsonRpc(accountId, category, method, params) {
     if (error instanceof McpHttpError && error.statusCode === 404) {
       const key = buildCacheKey(accountId, category);
       mcpSessionCache.delete(key);
-      session = await rebuildSession(accountId, category, url);
-      const { rpcResult, newSessionId } = await sendRawJsonRpc(url, session, body);
+      session = await rebuildSession(accountId, category, url, options);
+      const { rpcResult, newSessionId } = await sendRawJsonRpc(url, session, body, options);
       if (newSessionId) {
         session.sessionId = newSessionId;
       }
@@ -529,6 +576,7 @@ function parseArgs(args) {
 
 const textResult = (data) => ({
   content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  details: data,
 });
 
 const errorResult = (error, category) => {
@@ -543,7 +591,31 @@ const errorResult = (error, category) => {
   });
 };
 
-function checkBizErrorAndClearCache(accountId, category, result) {
+function parseMcpTextJson(result) {
+  if (!result || typeof result !== "object" || !Array.isArray(result.content)) {
+    return null;
+  }
+  const textItem = result.content.find((item) => item?.type === "text" && typeof item.text === "string");
+  if (!textItem) {
+    return null;
+  }
+  try {
+    return JSON.parse(textItem.text);
+  } catch {
+    return null;
+  }
+}
+
+function mcpContentResult(data) {
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(data),
+    }],
+  };
+}
+
+function checkBizErrorAndClearCache(ctx, result) {
   if (!result || typeof result !== "object" || !Array.isArray(result.content)) {
     return;
   }
@@ -555,7 +627,7 @@ function checkBizErrorAndClearCache(accountId, category, result) {
     try {
       const parsed = JSON.parse(item.text);
       if (typeof parsed.errcode === "number" && BIZ_CACHE_CLEAR_ERROR_CODES.has(parsed.errcode)) {
-        clearCategoryCache(accountId, category);
+        clearCategoryCache(ctx.accountId, ctx.category);
         return;
       }
     } catch {
@@ -564,19 +636,244 @@ function checkBizErrorAndClearCache(accountId, category, result) {
   }
 }
 
-async function handleList(accountId, category) {
-  const result = await sendJsonRpc(accountId, category, "tools/list");
+async function validateSmartpageCreateFiles(pages) {
+  let totalSize = 0;
+  for (let index = 0; index < pages.length; index += 1) {
+    const filePath = pages[index]?.page_filepath;
+    if (typeof filePath !== "string" || !filePath) {
+      continue;
+    }
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      continue;
+    }
+    if (stat.size > SMARTPAGE_CREATE_SINGLE_FILE_MAX_BYTES) {
+      throw new Error(`smartpage_create pages[${index}] file is larger than 10MB`);
+    }
+    totalSize += stat.size;
+    if (totalSize > SMARTPAGE_CREATE_TOTAL_FILE_MAX_BYTES) {
+      throw new Error("smartpage_create page files are larger than 20MB in total");
+    }
+  }
+}
+
+async function resolveSmartpageCreateArgs(ctx) {
+  const pages = ctx.args?.pages;
+  if (!Array.isArray(pages) || pages.length === 0) {
+    return undefined;
+  }
+  if (!pages.some((page) => typeof page?.page_filepath === "string" && page.page_filepath)) {
+    return undefined;
+  }
+
+  await validateSmartpageCreateFiles(pages);
+  const resolvedPages = await Promise.all(
+    pages.map(async (page, index) => {
+      const filePath = page?.page_filepath;
+      if (typeof filePath !== "string" || !filePath) {
+        return page;
+      }
+      const pageContent = await fs.readFile(filePath, "utf8").catch((error) => {
+        throw new Error(`smartpage_create pages[${index}] cannot read "${filePath}": ${error.message}`);
+      });
+      const { page_filepath: _pageFilepath, ...rest } = page;
+      return {
+        ...rest,
+        page_content: pageContent,
+      };
+    }),
+  );
+
+  return {
+    ...ctx.args,
+    pages: resolvedPages,
+  };
+}
+
+async function resolveBeforeCall(ctx) {
+  const options = {};
+  let args = ctx.args;
+
+  if (ctx.method === "get_msg_media") {
+    options.timeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS;
+  }
+
+  if (ctx.category === "doc" && ctx.method === "smartpage_create") {
+    const resolvedArgs = await resolveSmartpageCreateArgs(ctx);
+    if (resolvedArgs) {
+      args = resolvedArgs;
+    }
+  }
+
+  return { args, options };
+}
+
+function getMcpMediaRuntime() {
+  const runtime = getRuntime();
+  const mediaRuntime = runtime?.channel?.media ?? runtime?.media;
+  if (typeof mediaRuntime?.saveMediaBuffer !== "function") {
+    throw new Error("OpenClaw media runtime does not expose saveMediaBuffer");
+  }
+  return mediaRuntime;
+}
+
+async function saveMcpMediaBuffer(buffer, contentType, filename, maxBytes = INBOUND_MCP_MEDIA_MAX_BYTES) {
+  const mediaRuntime = getMcpMediaRuntime();
+  return mediaRuntime.saveMediaBuffer(buffer, contentType, "inbound", maxBytes, filename);
+}
+
+async function maybePatchSavedExtension(saved, contentType) {
+  const patchExt = contentType === "audio/amr" ? ".amr" : "";
+  if (!patchExt || path.extname(saved.path)) {
+    return saved;
+  }
+  const nextPath = `${saved.path}${patchExt}`;
+  try {
+    await fs.rename(saved.path, nextPath);
+    return { ...saved, path: nextPath };
+  } catch {
+    return saved;
+  }
+}
+
+async function interceptMsgMediaResponse(result) {
+  const bizData = parseMcpTextJson(result);
+  if (bizData?.errcode !== 0 || !bizData?.media_item || typeof bizData.media_item.base64_data !== "string") {
+    return result;
+  }
+
+  const mediaItem = bizData.media_item;
+  const buffer = Buffer.from(mediaItem.base64_data, "base64");
+  const contentType = (await detectMime({ buffer, filePath: mediaItem.name })) ?? "application/octet-stream";
+  const saved = await maybePatchSavedExtension(
+    await saveMcpMediaBuffer(buffer, contentType, mediaItem.name, INBOUND_MCP_MEDIA_MAX_BYTES),
+    contentType,
+  );
+
+  return mcpContentResult({
+    errcode: 0,
+    errmsg: "ok",
+    media_item: {
+      media_id: mediaItem.media_id,
+      name: mediaItem.name ?? path.basename(saved.path),
+      type: mediaItem.type,
+      local_path: saved.path,
+      size: buffer.length,
+      content_type: saved.contentType ?? contentType,
+    },
+  });
+}
+
+async function interceptSmartpageExportResponse(result) {
+  const bizData = parseMcpTextJson(result);
+  if (bizData?.errcode !== 0 || bizData.task_done !== true || typeof bizData.content !== "string") {
+    return result;
+  }
+
+  const buffer = Buffer.from(bizData.content, "utf8");
+  const saved = await saveMcpMediaBuffer(buffer, "text/markdown", "smartpage_export.md");
+  return mcpContentResult({
+    errcode: 0,
+    errmsg: bizData.errmsg ?? "ok",
+    task_done: true,
+    content_path: saved.path,
+  });
+}
+
+async function sendDocAuthBizMessage(ctx) {
+  const wsClient = getConnectedWsClient(ctx.accountId);
+  const body = {
+    biz_type: DOC_AUTH_BIZ_TYPE,
+  };
+  if (ctx.chatId) {
+    body.chat_id = ctx.chatId;
+  }
+  if (ctx.requesterUserId) {
+    body.userid = ctx.requesterUserId;
+  }
+  if (ctx.chatType) {
+    body.chat_type = ctx.chatType === "group" ? DOC_AUTH_CHAT_TYPE_GROUP : DOC_AUTH_CHAT_TYPE_SINGLE;
+  }
+
+  const reqId = generateReqId("biz_msg");
+  await withTimeout(
+    wsClient.reply({ headers: { req_id: reqId } }, body, AIBOT_SEND_BIZ_MSG_CMD),
+    BIZ_MSG_SEND_TIMEOUT_MS,
+    `aibot_send_biz_msg timed out after ${BIZ_MSG_SEND_TIMEOUT_MS}ms`,
+  );
+}
+
+async function interceptDocAuthError(ctx, result) {
+  const bizData = parseMcpTextJson(result);
+  const errcode = bizData?.errcode;
+  if (typeof errcode !== "number" || !DOC_AUTH_ERROR_CODES.has(errcode)) {
+    return result;
+  }
+
+  let bizMessageSent = false;
+  if (ctx.chatId && ctx.chatType) {
+    try {
+      await sendDocAuthBizMessage(ctx);
+      bizMessageSent = true;
+    } catch (error) {
+      logger.warn(`[wecom_mcp] failed to send doc auth biz message: ${error.message}`, {
+        accountId: ctx.accountId,
+        chatType: ctx.chatType,
+      });
+    }
+  } else {
+    logger.warn("[wecom_mcp] doc auth error intercepted without chat context", {
+      accountId: ctx.accountId,
+      hasChatId: Boolean(ctx.chatId),
+      hasChatType: Boolean(ctx.chatType),
+    });
+  }
+
+  return mcpContentResult({
+    errcode,
+    errmsg: bizData.errmsg ?? "authorization error",
+    _biz_msg_sent: bizMessageSent,
+    _user_hint: bizMessageSent
+      ? "文档授权提示卡片已直接发送给用户。请告知用户按提示授权后重试。"
+      : "当前会话缺少 chatId/chatType，无法发送文档授权提示卡片。请告知用户需要授权后重试。",
+  });
+}
+
+async function runAfterCall(ctx, result) {
+  checkBizErrorAndClearCache(ctx, result);
+  let current = await interceptDocAuthError(ctx, result);
+  if (ctx.method === "get_msg_media") {
+    current = await interceptMsgMediaResponse(current);
+  }
+  if (ctx.category === "doc" && ctx.method === "smartpage_get_export_result") {
+    current = await interceptSmartpageExportResponse(current);
+  }
+  return current;
+}
+
+async function handleList(ctx) {
+  const result = await sendJsonRpc(ctx.accountId, ctx.category, "tools/list", undefined, {
+    requesterUserId: ctx.requesterUserId,
+  });
+  const { category } = ctx;
   const normalized = normalizeBizResult(category, result);
   if (normalized !== result) {
     return normalized;
   }
   const tools = result?.tools ?? [];
   if (tools.length === 0) {
-    return { message: `No tools available under category "${category}"`, tools: [] };
+    return {
+      accountId: ctx.accountId,
+      category,
+      message: `No tools available under category "${category}"`,
+      tools: [],
+    };
   }
 
   return {
-    accountId,
+    accountId: ctx.accountId,
     category,
     count: tools.length,
     tools: tools.map((tool) => ({
@@ -587,16 +884,31 @@ async function handleList(accountId, category) {
   };
 }
 
-async function handleCall(accountId, category, method, args) {
-  const result = await sendJsonRpc(accountId, category, "tools/call", {
-    name: method,
-    arguments: args,
-  });
-  checkBizErrorAndClearCache(accountId, category, result);
-  return normalizeBizResult(category, result);
+async function handleCall(ctx) {
+  const before = await resolveBeforeCall(ctx);
+  const result = await sendJsonRpc(
+    ctx.accountId,
+    ctx.category,
+    "tools/call",
+    {
+      name: ctx.method,
+      arguments: before.args,
+    },
+    {
+      ...before.options,
+      requesterUserId: ctx.requesterUserId,
+    },
+  );
+  const intercepted = await runAfterCall(ctx, result);
+  return normalizeBizResult(ctx.category, intercepted);
 }
 
-export function createWeComMcpTool() {
+export function createWeComMcpTool(options = {}) {
+  const requesterUserId = normalizeOptionalString(options.requesterUserId);
+  const explicitAccountId = normalizeOptionalString(options.accountId);
+  const chatId = normalizeOptionalString(options.chatId);
+  const chatType = options.chatType === "group" ? "group" : options.chatType === "single" ? "single" : undefined;
+
   return {
     name: "wecom_mcp",
     label: "WeCom MCP Tool",
@@ -644,16 +956,26 @@ export function createWeComMcpTool() {
       required: ["action", "category"],
     },
     async execute(_toolCallId, params) {
-      const accountId = resolveCurrentAccountId();
+      const accountId = explicitAccountId || resolveCurrentAccountId();
       try {
+        const ctx = {
+          accountId,
+          requesterUserId,
+          chatId,
+          chatType,
+          category: params.category,
+          method: params.method ?? "",
+          args: {},
+        };
         switch (params.action) {
           case "list":
-            return textResult(await handleList(accountId, params.category));
+            return textResult(await handleList(ctx));
           case "call":
             if (!params.method) {
               return textResult({ error: "method is required when action=call" });
             }
-            return textResult(await handleCall(accountId, params.category, params.method, parseArgs(params.args)));
+            ctx.args = parseArgs(params.args);
+            return textResult(await handleCall(ctx));
           default:
             return textResult({ error: `Unknown action: ${String(params.action)}` });
         }
@@ -667,6 +989,7 @@ export function createWeComMcpTool() {
 export const mcpToolTesting = {
   cleanSchemaForGemini,
   parseArgs,
+  OFFICIAL_WECOM_PLUGIN_VERSION,
   resetCaches() {
     mcpConfigCache.clear();
     mcpSessionCache.clear();

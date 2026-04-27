@@ -50,7 +50,7 @@ import {
   recordOutboundActivity,
   recordPassiveReply,
 } from "./runtime-telemetry.js";
-import { dispatchLocks, getRuntime, setOpenclawConfig, streamContext } from "./state.js";
+import { dispatchLocks, getRuntime, setOpenclawConfig, setSessionChatInfo, streamContext } from "./state.js";
 import {
   cleanupWsAccount,
   deleteMessageState,
@@ -432,7 +432,7 @@ function buildReplyMediaGuidance(config, agentId) {
     "CRITICAL: Do NOT echo raw browser host paths from browser tools directly in the final reply.",
     "If a browser tool returns MEDIA:/... or FILE:/... under that browser media directory, call stage_browser_media first.",
     "stage_browser_media copies the browser file into the current workspace and returns a safe /workspace/... directive for the final reply.",
-    "Do NOT call message.send or message.sendAttachment to deliver files back to the current WeCom chat/user; use MEDIA: or FILE: directives instead.",
+    "Do NOT use the message tool with action=\"send\" or action=\"sendAttachment\" to deliver files back to the current WeCom chat/user; use MEDIA: or FILE: directives instead.",
     "CRITICAL: MEDIA: and FILE: directives MUST be placed INSIDE <final> tags. Directives placed outside <final> are silently discarded by the system and the file will never be sent.",
     "For images: put each image path on its own line INSIDE <final> tags as MEDIA:/abs/path.",
     "If a local file is in the current sandbox workspace, use its /workspace/... path directly.",
@@ -443,7 +443,7 @@ function buildReplyMediaGuidance(config, agentId) {
     "Each directive MUST be on its own line with no other text on that line.",
     "The plugin will automatically send the media to the user.",
     "[WeCom cross-chat send rule]",
-    `If you proactively send a WeCom message to a different user/group via message.send, prepend this exact hidden header on the first line: [[sender:${senderLabel}]]`,
+    `If you proactively send a WeCom message to a different user/group via the OpenClaw message tool (action=\"send\", channel=\"wecom\"), prepend this exact hidden header on the first line of the message: [[sender:${senderLabel}]]`,
     `Example cross-chat content: [[sender:${senderLabel}]]\\n你好`,
     "Use the sender header only for proactive cross-chat sends. Do NOT add it when replying in the current WeCom chat.",
   ];
@@ -526,11 +526,11 @@ function buildBodyForAgent(body, config, agentId) {
   const senderLabel = resolveOutboundSenderLabel(agentId);
   const inlineRules = [
     "[WeCom agent rules]",
-    "If proactively sending to a different WeCom user/group via message.send, prepend this exact hidden header on the first line:",
+    "If proactively sending to a different WeCom user/group via the OpenClaw message tool (action=\"send\", channel=\"wecom\"), prepend this exact hidden header on the first line of the message:",
     `[[sender:${senderLabel}]]`,
     `Example: [[sender:${senderLabel}]]\\n你好`,
     "Do NOT add that header when replying in the current WeCom chat.",
-    "To send files back to the current WeCom chat, do NOT use message.send or message.sendAttachment; emit MEDIA:/... or FILE:/... directives on their own lines INSIDE <final> tags.",
+    "To send files back to the current WeCom chat, do NOT use the message tool with action=\"send\" or action=\"sendAttachment\"; emit MEDIA:/... or FILE:/... directives on their own lines INSIDE <final> tags.",
   ].join("\n");
 
   return `${inlineRules}\n\n${body}`;
@@ -1698,6 +1698,10 @@ async function processWsMessage({ frame, account, config, runtime, wsClient, req
     isGroupChat,
   });
   ctxPayload.CommandAuthorized = commandAuthorized;
+  setSessionChatInfo(ctxPayload.SessionKey ?? route.sessionKey, {
+    chatId,
+    chatType: isGroupChat ? "group" : "single",
+  });
 
   await ensureDefaultSessionReasoningLevel({
     core,
