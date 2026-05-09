@@ -183,6 +183,26 @@ describe("normalizeReplyPayload", () => {
     assert.equal(result.text, `参考资料：\n${docUrl}`);
     assert.deepEqual(result.mediaUrls, []);
   });
+
+  it("does not send visible markdown reference links as reply media", () => {
+    const imageUrl = "https://example.com/a.png";
+    const docUrl = "https://example.com/a.docx";
+    const videoUrl = "https://example.com/a.mp4";
+    const content = [
+      "### 图片参考",
+      `![图1](${imageUrl})`,
+      "### 参考资料",
+      `- [文档](${docUrl})`,
+      `- [视频](${videoUrl})`,
+    ].join("\n");
+    const result = normalizeReplyPayload({
+      text: content,
+      mediaUrls: [imageUrl, docUrl, videoUrl],
+    });
+
+    assert.equal(result.text, content);
+    assert.deepEqual(result.mediaUrls, []);
+  });
 });
 
 describe("buildReplyMediaGuidance", () => {

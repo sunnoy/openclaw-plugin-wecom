@@ -563,6 +563,43 @@ function extractRemoteMarkdownImageUrls(content) {
   return urls;
 }
 
+function normalizeVisibleRemoteUrl(url) {
+  const text = String(url ?? "").trim();
+  if (!/^https?:\/\//i.test(text)) {
+    return "";
+  }
+  try {
+    const parsed = new URL(text);
+    return parsed.href;
+  } catch {
+    return text;
+  }
+}
+
+function extractVisibleRemoteUrls(content) {
+  const text = String(content ?? "");
+  const urls = new Set();
+  const markdownUrlPattern = /!?\[[^\]]*]\(\s*(https?:\/\/[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/gi;
+  const rawUrlPattern = /https?:\/\/[^\s<>)`"']+/gi;
+  let match;
+
+  while ((match = markdownUrlPattern.exec(text))) {
+    const normalized = normalizeVisibleRemoteUrl(match[1]);
+    if (normalized) {
+      urls.add(normalized);
+    }
+  }
+
+  while ((match = rawUrlPattern.exec(text))) {
+    const normalized = normalizeVisibleRemoteUrl(String(match[0] ?? "").replace(/[。．.，,；;]+$/g, ""));
+    if (normalized) {
+      urls.add(normalized);
+    }
+  }
+
+  return urls;
+}
+
 function isRemoteHttpUrl(value) {
   return /^https?:\/\//i.test(String(value ?? "").trim());
 }
@@ -697,9 +734,15 @@ function normalizeReplyPayload(payload) {
     : [];
   const parsed = splitReplyMediaFromText(payload?.text);
   const normalizedText = normalizePlainRemoteImageUrlsInReply(parsed.text);
-  const inlineRemoteImageUrls = new Set(extractRemoteMarkdownImageUrls(normalizedText));
+  const visibleRemoteUrls = extractVisibleRemoteUrls(normalizedText);
   const mediaUrls = mergeReplyMediaUrls(explicitMediaUrls, explicitMediaUrl, parsed.mediaUrls)
-    .filter((mediaUrl) => !(isRemoteHttpUrl(mediaUrl) && inlineRemoteImageUrls.has(mediaUrl.trim())));
+    .filter((mediaUrl) => {
+      if (!isRemoteHttpUrl(mediaUrl)) {
+        return true;
+      }
+      const normalizedUrl = normalizeVisibleRemoteUrl(mediaUrl);
+      return !normalizedUrl || !visibleRemoteUrls.has(normalizedUrl);
+    });
 
   return {
     text: normalizedText,
