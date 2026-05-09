@@ -139,7 +139,7 @@ describe("buildWsActiveSendBody", () => {
 });
 
 describe("normalizeReplyPayload", () => {
-  it("keeps remote markdown images inline instead of duplicating them as reply media", () => {
+  it("keeps remote markdown images as fallback reply media for passive replies", () => {
     const imageUrl = "https://example.com/a.png";
     const content = `步骤如下\n\n![图1](${imageUrl})`;
     const result = normalizeReplyPayload({
@@ -148,7 +148,7 @@ describe("normalizeReplyPayload", () => {
     });
 
     assert.equal(result.text, content);
-    assert.deepEqual(result.mediaUrls, []);
+    assert.deepEqual(result.mediaUrls, [imageUrl]);
   });
 
   it("keeps remote reply media when it is not already embedded in markdown text", () => {
@@ -162,7 +162,7 @@ describe("normalizeReplyPayload", () => {
     assert.deepEqual(result.mediaUrls, [imageUrl]);
   });
 
-  it("rewrites standalone remote image URLs to markdown images and avoids duplicate media", () => {
+  it("rewrites standalone remote image URLs to markdown images and keeps fallback media", () => {
     const imageUrl = "https://example.com/a.png";
     const result = normalizeReplyPayload({
       text: `图片参考：\n${imageUrl}`,
@@ -170,7 +170,7 @@ describe("normalizeReplyPayload", () => {
     });
 
     assert.equal(result.text, `图片参考：\n![图片](https://example.com/a.png)`);
-    assert.deepEqual(result.mediaUrls, []);
+    assert.deepEqual(result.mediaUrls, [imageUrl]);
   });
 
   it("does not rewrite standalone non-image URLs", () => {
@@ -184,7 +184,7 @@ describe("normalizeReplyPayload", () => {
     assert.deepEqual(result.mediaUrls, []);
   });
 
-  it("does not send visible markdown reference links as reply media", () => {
+  it("keeps visible markdown images as media but not visible document/video links", () => {
     const imageUrl = "https://example.com/a.png";
     const docUrl = "https://example.com/a.docx";
     const videoUrl = "https://example.com/a.mp4";
@@ -201,7 +201,7 @@ describe("normalizeReplyPayload", () => {
     });
 
     assert.equal(result.text, content);
-    assert.deepEqual(result.mediaUrls, []);
+    assert.deepEqual(result.mediaUrls, [imageUrl]);
   });
 });
 

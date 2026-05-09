@@ -402,6 +402,26 @@ async function createAgentApiServer() {
   };
 }
 
+async function createImageServer() {
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aU9sAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const server = createServer((_req, res) => {
+    res.setHeader("Content-Type", "image/png");
+    res.end(imageBuffer);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+
+  return {
+    url: `http://127.0.0.1:${address.port}/guide.png`,
+    async close() {
+      await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    },
+  };
+}
+
 describe("WS e2e", () => {
   let tempDir;
   let originalStateDir;
@@ -1025,8 +1045,9 @@ describe("WS e2e", () => {
     }
   });
 
-  it("preserves passive remote markdown images inline instead of attaching duplicate msg_item media", async () => {
-    const imageUrl = "https://example.com/guide.png";
+  it("attaches passive remote markdown images via msg_item and strips markdown image syntax", async () => {
+    const imageServer = await createImageServer();
+    const imageUrl = imageServer.url;
     const text = `步骤如下\n\n![设置界面](${imageUrl})`;
     const harness = await startHarness({
       replyPayloadFactory: () => ({
@@ -1047,19 +1068,24 @@ describe("WS e2e", () => {
       const finals = await eventually(() => {
         const calls = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
         assert.ok(calls.length >= 1);
+        assert.ok(calls[0].msgItem?.length >= 1);
         return calls;
       });
       assert.equal(harness.wsClient.uploadMediaCalls.length, 0);
       assert.equal(harness.wsClient.sendMediaMessageCalls.length, 0);
-      assert.equal(finals[0].msgItem, undefined);
-      assert.ok(finals[0].content.includes(`![设置界面](${imageUrl})`));
+      assert.equal(finals[0].msgItem[0].msgtype, "image");
+      assert.ok(finals[0].content.includes("步骤如下"));
+      assert.ok(!finals[0].content.includes(`![设置界面](${imageUrl})`));
+      assert.ok(!finals[0].content.includes(imageUrl));
     } finally {
+      await imageServer.close();
       await harness.stop();
     }
   });
 
   it("defers passive media planning until final text is available", async () => {
-    const imageUrl = "https://example.com/guide.png";
+    const imageServer = await createImageServer();
+    const imageUrl = imageServer.url;
     const text = `步骤如下\n\n![](${imageUrl})`;
     const harness = await startHarness({
       replyPayloadFactory: () => [
@@ -1080,19 +1106,24 @@ describe("WS e2e", () => {
       const finals = await eventually(() => {
         const calls = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
         assert.ok(calls.length >= 1);
+        assert.ok(calls[0].msgItem?.length >= 1);
         return calls;
       });
       assert.equal(harness.wsClient.uploadMediaCalls.length, 0);
       assert.equal(harness.wsClient.sendMediaMessageCalls.length, 0);
-      assert.equal(finals[0].msgItem, undefined);
-      assert.ok(finals[0].content.includes(`![](${imageUrl})`));
+      assert.equal(finals[0].msgItem[0].msgtype, "image");
+      assert.ok(finals[0].content.includes("步骤如下"));
+      assert.ok(!finals[0].content.includes(`![](${imageUrl})`));
+      assert.ok(!finals[0].content.includes(imageUrl));
     } finally {
+      await imageServer.close();
       await harness.stop();
     }
   });
 
-  it("rewrites passive standalone remote image URLs inline instead of attaching duplicate msg_item media", async () => {
-    const imageUrl = "https://example.com/guide.png";
+  it("rewrites passive standalone remote image URLs and sends them via msg_item fallback", async () => {
+    const imageServer = await createImageServer();
+    const imageUrl = imageServer.url;
     const text = `图片参考：\n${imageUrl}`;
     const harness = await startHarness({
       replyPayloadFactory: () => ({
@@ -1113,13 +1144,17 @@ describe("WS e2e", () => {
       const finals = await eventually(() => {
         const calls = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
         assert.ok(calls.length >= 1);
+        assert.ok(calls[0].msgItem?.length >= 1);
         return calls;
       });
       assert.equal(harness.wsClient.uploadMediaCalls.length, 0);
       assert.equal(harness.wsClient.sendMediaMessageCalls.length, 0);
-      assert.equal(finals[0].msgItem, undefined);
-      assert.ok(finals[0].content.includes(`![图片](${imageUrl})`));
+      assert.equal(finals[0].msgItem[0].msgtype, "image");
+      assert.ok(finals[0].content.includes("图片参考："));
+      assert.ok(!finals[0].content.includes(`![图片](${imageUrl})`));
+      assert.ok(!finals[0].content.includes(imageUrl));
     } finally {
+      await imageServer.close();
       await harness.stop();
     }
   });

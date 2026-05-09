@@ -600,6 +600,38 @@ function extractVisibleRemoteUrls(content) {
   return urls;
 }
 
+function stripAttachedMarkdownImages(content, attachedUrls) {
+  const text = String(content ?? "");
+  const urls = new Set(
+    (attachedUrls ?? [])
+      .map((url) => normalizeVisibleRemoteUrl(url))
+      .filter(Boolean),
+  );
+  if (!text || urls.size === 0) {
+    return text;
+  }
+
+  const markdownImagePattern = /!\[[^\]]*]\(\s*(https?:\/\/[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/gi;
+  const stripped = text
+    .split("\n")
+    .map((line) => line.replace(markdownImagePattern, (full, url) => {
+      const normalizedUrl = normalizeVisibleRemoteUrl(url);
+      return normalizedUrl && urls.has(normalizedUrl) ? "" : full;
+    }).trimEnd())
+    .filter((line, index, lines) => {
+      if (line.trim()) {
+        return true;
+      }
+      const prevBlank = index > 0 && !String(lines[index - 1] ?? "").trim();
+      return !prevBlank;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return stripped;
+}
+
 function isRemoteHttpUrl(value) {
   return /^https?:\/\//i.test(String(value ?? "").trim());
 }
@@ -741,7 +773,7 @@ function normalizeReplyPayload(payload) {
         return true;
       }
       const normalizedUrl = normalizeVisibleRemoteUrl(mediaUrl);
-      return !normalizedUrl || !visibleRemoteUrls.has(normalizedUrl);
+      return isRemoteImageUrl(normalizedUrl) || !normalizedUrl || !visibleRemoteUrls.has(normalizedUrl);
     });
 
   return {
@@ -793,6 +825,7 @@ async function sendMediaBatch({ wsClient, frame, state, account, runtime, config
       });
       if (streamImage.ok) {
         state.streamMsgItems.push(streamImage.msgItem);
+        state.attachedReplyMediaUrls.push(mediaUrl);
         state.hasMedia = true;
         state.hasImageMedia = true;
         logger.info(`[WS] Media attached via stream msg_item: url=${mediaUrl}, type=${streamImage.contentType}`);
@@ -811,6 +844,7 @@ async function sendMediaBatch({ wsClient, frame, state, account, runtime, config
     });
 
     if (result.ok) {
+      state.attachedReplyMediaUrls.push(mediaUrl);
       state.hasMedia = true;
       if (result.finalType === "image") {
         state.hasImageMedia = true;
@@ -843,7 +877,7 @@ function pruneVisibleRemoteReplyMedia(state) {
       return true;
     }
     const normalizedUrl = normalizeVisibleRemoteUrl(mediaUrl);
-    return !normalizedUrl || !visibleRemoteUrls.has(normalizedUrl);
+    return isRemoteImageUrl(normalizedUrl) || !normalizedUrl || !visibleRemoteUrls.has(normalizedUrl);
   };
 
   state.pendingMediaUrls = (state.pendingMediaUrls ?? []).filter(shouldKeep);
@@ -860,6 +894,10 @@ async function flushQueuedReplyMedia({ wsClient, frame, state, account, runtime,
     await sendMediaBatch({
       wsClient, frame, state, account, runtime, config, agentId,
     });
+    state.accumulatedText = stripAttachedMarkdownImages(
+      state.accumulatedText,
+      state.attachedReplyMediaUrls,
+    );
   } catch (mediaErr) {
     state.hasMediaFailed = true;
     const errMsg = String(mediaErr);
@@ -1675,6 +1713,7 @@ async function processWsMessage({
     replyMediaUrls: [],
     pendingMediaUrls: [],
     streamMsgItems: [],
+    attachedReplyMediaUrls: [],
     hasMedia: false,
     hasImageMedia: false,
     hasFileMedia: false,
