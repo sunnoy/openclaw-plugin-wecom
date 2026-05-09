@@ -161,6 +161,28 @@ describe("normalizeReplyPayload", () => {
     assert.equal(result.text, "图片如下");
     assert.deepEqual(result.mediaUrls, [imageUrl]);
   });
+
+  it("rewrites standalone remote image URLs to markdown images and avoids duplicate media", () => {
+    const imageUrl = "https://example.com/a.png";
+    const result = normalizeReplyPayload({
+      text: `图片参考：\n${imageUrl}`,
+      mediaUrls: [imageUrl],
+    });
+
+    assert.equal(result.text, `图片参考：\n![图片](https://example.com/a.png)`);
+    assert.deepEqual(result.mediaUrls, []);
+  });
+
+  it("does not rewrite standalone non-image URLs", () => {
+    const docUrl = "https://example.com/a.docx";
+    const result = normalizeReplyPayload({
+      text: `参考资料：\n${docUrl}`,
+      mediaUrls: [],
+    });
+
+    assert.equal(result.text, `参考资料：\n${docUrl}`);
+    assert.deepEqual(result.mediaUrls, []);
+  });
 });
 
 describe("buildReplyMediaGuidance", () => {

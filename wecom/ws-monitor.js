@@ -439,6 +439,7 @@ function buildReplyMediaGuidance(config, agentId) {
     "Example: <final>报告已生成，请查收。\\nFILE:/workspace/report.xlsx\\n</final> — or for a skill file: <final>\\nFILE:/workspace/skills/deep-research/SKILL.md\\n</final>",
     "CRITICAL: Never use MEDIA: for non-image files. PDF must always use FILE:, never MEDIA:.",
     "CRITICAL: If a tool already returned a path prefixed with FILE: (e.g. FILE:/abs/path.pdf), keep the FILE: prefix exactly as-is. Do NOT change it to MEDIA:.",
+    "For public HTTPS images that should appear inline in the answer, keep them as markdown images like ![图片说明](https://example.com/image.png). Do NOT downgrade them to plain URLs.",
     "Each directive MUST be on its own line with no other text on that line.",
     "The plugin will automatically send the media to the user.",
     "[WeCom cross-chat send rule]",
@@ -566,6 +567,78 @@ function isRemoteHttpUrl(value) {
   return /^https?:\/\//i.test(String(value ?? "").trim());
 }
 
+function isRemoteImageUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!/^https?:\/\//i.test(text)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(text);
+    return /\.(?:apng|avif|gif|jpe?g|png|webp)(?:$|[?#])/i.test(parsed.pathname);
+  } catch {
+    return /\.(?:apng|avif|gif|jpe?g|png|webp)(?:$|[?#])/i.test(text);
+  }
+}
+
+function escapeMarkdownAltText(value) {
+  return String(value ?? "图片")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[[\]\\]/g, "")
+    .trim()
+    .slice(0, 80) || "图片";
+}
+
+function inferPlainImageAltText(previousLine) {
+  const cleaned = String(previousLine ?? "")
+    .trim()
+    .replace(/[:：]\s*$/, "")
+    .replace(/^(?:[-*•]\s+|\d+\.\s+)?/, "")
+    .trim();
+  if (!cleaned || /^图片(?:参考|如下)?$/i.test(cleaned)) {
+    return "图片";
+  }
+  if (/图片|图示|截图|界面|参考/i.test(cleaned)) {
+    return cleaned;
+  }
+  return "图片";
+}
+
+function extractStandaloneRemoteImageUrl(line) {
+  const match = String(line ?? "").match(/^\s*(?:[-*•]\s+|\d+\.\s+)?[`<]?((?:https?:\/\/)[^\s`>)]+)[`>]?[\s。．.，,；;]*$/i);
+  if (!match) {
+    return "";
+  }
+  const url = String(match[1] ?? "").trim();
+  return isRemoteImageUrl(url) ? url : "";
+}
+
+function normalizePlainRemoteImageUrlsInReply(text) {
+  const source = typeof text === "string" ? text : "";
+  if (!source || !/https?:\/\//i.test(source)) {
+    return source;
+  }
+
+  const lines = source.split("\n");
+  const normalized = [];
+  let changed = false;
+
+  for (const line of lines) {
+    const url = extractStandaloneRemoteImageUrl(line);
+    if (!url) {
+      normalized.push(line);
+      continue;
+    }
+
+    const previousLine = normalized.length > 0 ? normalized[normalized.length - 1] : "";
+    const altText = escapeMarkdownAltText(inferPlainImageAltText(previousLine));
+    normalized.push(`![${altText}](${url})`);
+    changed = true;
+  }
+
+  return changed ? normalized.join("\n") : source;
+}
+
 function buildWsActiveSendBody(content, { forceFormat } = {}) {
   const text = String(content ?? "");
   if (forceFormat === "markdown_v2" || (!forceFormat && hasRemoteMarkdownImage(text))) {
@@ -623,12 +696,13 @@ function normalizeReplyPayload(payload) {
     ? [payload.mediaUrl.trim()]
     : [];
   const parsed = splitReplyMediaFromText(payload?.text);
-  const inlineRemoteImageUrls = new Set(extractRemoteMarkdownImageUrls(parsed.text));
+  const normalizedText = normalizePlainRemoteImageUrlsInReply(parsed.text);
+  const inlineRemoteImageUrls = new Set(extractRemoteMarkdownImageUrls(normalizedText));
   const mediaUrls = mergeReplyMediaUrls(explicitMediaUrls, explicitMediaUrl, parsed.mediaUrls)
     .filter((mediaUrl) => !(isRemoteHttpUrl(mediaUrl) && inlineRemoteImageUrls.has(mediaUrl.trim())));
 
   return {
-    text: parsed.text,
+    text: normalizedText,
     mediaUrls,
   };
 }
