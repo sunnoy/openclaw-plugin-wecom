@@ -832,6 +832,45 @@ async function sendMediaBatch({ wsClient, frame, state, account, runtime, config
   state.pendingMediaUrls = [];
 }
 
+function pruneVisibleRemoteReplyMedia(state) {
+  const visibleRemoteUrls = extractVisibleRemoteUrls(state?.accumulatedText ?? "");
+  if (visibleRemoteUrls.size === 0) {
+    return;
+  }
+
+  const shouldKeep = (mediaUrl) => {
+    if (!isRemoteHttpUrl(mediaUrl)) {
+      return true;
+    }
+    const normalizedUrl = normalizeVisibleRemoteUrl(mediaUrl);
+    return !normalizedUrl || !visibleRemoteUrls.has(normalizedUrl);
+  };
+
+  state.pendingMediaUrls = (state.pendingMediaUrls ?? []).filter(shouldKeep);
+  state.replyMediaUrls = (state.replyMediaUrls ?? []).filter(shouldKeep);
+}
+
+async function flushQueuedReplyMedia({ wsClient, frame, state, account, runtime, config, agentId }) {
+  pruneVisibleRemoteReplyMedia(state);
+  if (!state.pendingMediaUrls?.length) {
+    return;
+  }
+
+  try {
+    await sendMediaBatch({
+      wsClient, frame, state, account, runtime, config, agentId,
+    });
+  } catch (mediaErr) {
+    state.hasMediaFailed = true;
+    const errMsg = String(mediaErr);
+    const summary = `文件发送失败：内部处理异常，请升级 openclaw 到最新版本后重试。\n错误详情：${errMsg}`;
+    state.mediaErrorSummary = state.mediaErrorSummary
+      ? `${state.mediaErrorSummary}\n\n${summary}`
+      : summary;
+    logger.error(`[WS] sendMediaBatch threw: ${errMsg}`);
+  }
+}
+
 async function finishThinkingStream({ wsClient, frame, state, accountId }) {
   const visibleText = stripThinkTags(state.accumulatedText);
   let finishText;
@@ -2155,23 +2194,6 @@ async function processWsMessage({
                   }
                 }
 
-                if (state.pendingMediaUrls.length > 0) {
-                  try {
-                    await sendMediaBatch({
-                      wsClient, frame, state, account, runtime, config,
-                      agentId: route.agentId,
-                    });
-                  } catch (mediaErr) {
-                    state.hasMediaFailed = true;
-                    const errMsg = String(mediaErr);
-                    const summary = `文件发送失败：内部处理异常，请升级 openclaw 到最新版本后重试。\n错误详情：${errMsg}`;
-                    state.mediaErrorSummary = state.mediaErrorSummary
-                      ? `${state.mediaErrorSummary}\n\n${summary}`
-                      : summary;
-                    logger.error(`[WS] sendMediaBatch threw: ${errMsg}`);
-                  }
-                }
-
                 if (!perfState.firstVisibleReceivedAt && chunk?.trim()) {
                   perfState.firstVisibleReceivedAt = Date.now();
                   logPerf("first_visible_received", {
@@ -2213,6 +2235,10 @@ async function processWsMessage({
       cancelPendingTimers();
 
       try {
+        await flushQueuedReplyMedia({
+          wsClient, frame, state, account, runtime, config,
+          agentId: route.agentId,
+        });
         await finishThinkingStream({
           wsClient,
           frame,

@@ -1058,6 +1058,39 @@ describe("WS e2e", () => {
     }
   });
 
+  it("defers passive media planning until final text is available", async () => {
+    const imageUrl = "https://example.com/guide.png";
+    const text = `步骤如下\n\n![](${imageUrl})`;
+    const harness = await startHarness({
+      replyPayloadFactory: () => [
+        { text: "", mediaUrls: [imageUrl], kind: "chunk" },
+        { text, mediaUrls: [], kind: "final" },
+      ],
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "AE330如何恢复出厂设置" },
+        }),
+      );
+
+      const finals = await eventually(() => {
+        const calls = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
+        assert.ok(calls.length >= 1);
+        return calls;
+      });
+      assert.equal(harness.wsClient.uploadMediaCalls.length, 0);
+      assert.equal(harness.wsClient.sendMediaMessageCalls.length, 0);
+      assert.equal(finals[0].msgItem, undefined);
+      assert.ok(finals[0].content.includes(`![](${imageUrl})`));
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("rewrites passive standalone remote image URLs inline instead of attaching duplicate msg_item media", async () => {
     const imageUrl = "https://example.com/guide.png";
     const text = `图片参考：\n${imageUrl}`;
