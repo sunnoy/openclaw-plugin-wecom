@@ -10,14 +10,12 @@ DRY_RUN=0
 INSTALL_DEPS=1
 
 SUPPORTED_SKILLS=(
-  wecom-doc-manager
-  wecom-preflight
-  wecom-smartsheet-data
-  wecom-smartsheet-schema
+  wecom-mcp-doc
 )
 
 UNSUPPORTED_SKILLS=(
   wecom-contact-lookup
+  wecom-doc-manager
   wecom-edit-todo
   wecom-get-todo-detail
   wecom-get-todo-list
@@ -25,8 +23,11 @@ UNSUPPORTED_SKILLS=(
   wecom-meeting-manage
   wecom-meeting-query
   wecom-msg
+  wecom-preflight
   wecom-schedule
   wecom-send-media
+  wecom-smartsheet-data
+  wecom-smartsheet-schema
 )
 
 usage() {
