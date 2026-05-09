@@ -42,11 +42,16 @@ export async function webhookSendText({ url, content, mentionedList, mentionedMo
  * @param {string} params.content - Markdown content
  */
 export async function webhookSendMarkdown({ url, content }) {
-  const body = {
-    msgtype: "markdown",
-    markdown: { content },
-  };
-  await postWebhook(url, body);
+  const body = buildWebhookMarkdownBody(content);
+  try {
+    await postWebhook(url, body);
+  } catch (error) {
+    if (body.msgtype !== "markdown_v2") {
+      throw error;
+    }
+    logger.warn(`Webhook markdown_v2 send failed, falling back to markdown: ${error.message}`);
+    await postWebhook(url, buildWebhookMarkdownBody(content, { forceFormat: "markdown" }));
+  }
 }
 
 /**
@@ -135,6 +140,24 @@ function extractKey(url) {
   }
 }
 
+function hasRemoteMarkdownImage(content) {
+  return /!\[[^\]]*]\(\s*https?:\/\/[^)\s]+(?:\s+["'][^"']*["'])?\s*\)/i.test(String(content ?? ""));
+}
+
+function buildWebhookMarkdownBody(content, { forceFormat } = {}) {
+  const text = String(content ?? "");
+  if (forceFormat === "markdown_v2" || (!forceFormat && hasRemoteMarkdownImage(text))) {
+    return {
+      msgtype: "markdown_v2",
+      markdown_v2: { content: text },
+    };
+  }
+  return {
+    msgtype: "markdown",
+    markdown: { content: text },
+  };
+}
+
 /**
  * POST a JSON payload to the webhook endpoint and validate the response.
  */
@@ -153,3 +176,8 @@ async function postWebhook(url, body) {
   }
   return json;
 }
+
+export const webhookBotTesting = {
+  buildWebhookMarkdownBody,
+  hasRemoteMarkdownImage,
+};

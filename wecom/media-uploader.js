@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { basename } from "node:path";
 import { logger } from "../logger.js";
 import { loadOutboundMediaFromUrl, detectMime, getExtendedMediaLocalRoots } from "./openclaw-compat.js";
@@ -9,6 +10,7 @@ import {
 } from "./constants.js";
 
 const VOICE_SUPPORTED_MIMES = new Set(["audio/amr"]);
+const STREAM_MSG_ITEM_IMAGE_MIMES = new Set(["image/jpeg", "image/png"]);
 
 const MIME_TO_EXT = {
   "image/jpeg": ".jpg",
@@ -152,6 +154,66 @@ export function buildMediaErrorSummary(mediaUrl, result) {
   return `文件发送失败：无法处理文件 ${mediaUrl}，请稍后再试。`;
 }
 
+export async function buildStreamImageMsgItem({
+  mediaUrl,
+  mediaLocalRoots,
+  includeDefaultMediaLocalRoots = true,
+  maxBytes = IMAGE_MAX_BYTES,
+}) {
+  try {
+    const media = await resolveMediaFile(mediaUrl, mediaLocalRoots, includeDefaultMediaLocalRoots);
+    const detectedType = detectWeComMediaType(media.contentType);
+    const contentType = String(media.contentType || "").toLowerCase();
+
+    if (detectedType !== "image") {
+      return {
+        ok: false,
+        fallback: true,
+        rejectReason: "not_image",
+        contentType,
+      };
+    }
+
+    if (!STREAM_MSG_ITEM_IMAGE_MIMES.has(contentType)) {
+      return {
+        ok: false,
+        fallback: true,
+        rejectReason: `stream_msg_item only supports JPG/PNG images, got ${contentType || "unknown"}`,
+        contentType,
+      };
+    }
+
+    if (media.buffer.length > maxBytes) {
+      return {
+        ok: false,
+        fallback: true,
+        rejectReason: `image size ${(media.buffer.length / (1024 * 1024)).toFixed(2)}MB exceeds stream msg_item limit`,
+        contentType,
+      };
+    }
+
+    return {
+      ok: true,
+      finalType: "image",
+      contentType,
+      fileName: media.fileName,
+      msgItem: {
+        msgtype: "image",
+        image: {
+          base64: media.buffer.toString("base64"),
+          md5: crypto.createHash("md5").update(media.buffer).digest("hex"),
+        },
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      fallback: true,
+      error: String(err),
+    };
+  }
+}
+
 export async function uploadAndSendMedia({
   wsClient,
   mediaUrl,
@@ -204,5 +266,6 @@ export async function uploadAndSendMedia({
 
 export const mediaUploaderTesting = {
   resolveMediaFile,
+  buildStreamImageMsgItem,
   VOICE_SUPPORTED_MIMES,
 };

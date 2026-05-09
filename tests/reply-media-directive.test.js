@@ -12,6 +12,7 @@ const {
   splitReplyMediaFromText,
   buildBodyForAgent,
   buildWsActiveSendBody,
+  hasRemoteMarkdownImage,
   normalizeReplyMediaUrlForLoad,
 } = wsMonitorTesting;
 const { resolveOutboundSenderLabel } = wsMonitorTesting;
@@ -121,6 +122,15 @@ describe("buildWsActiveSendBody", () => {
     assert.deepEqual(buildWsActiveSendBody("## 标题\n- 第一项"), {
       msgtype: "markdown",
       markdown: { content: "## 标题\n- 第一项" },
+    });
+  });
+
+  it("uses markdown_v2 when outbound content contains remote markdown images", () => {
+    const content = "步骤如下\n\n![图1](https://example.com/a.png)";
+    assert.equal(hasRemoteMarkdownImage(content), true);
+    assert.deepEqual(buildWsActiveSendBody(content), {
+      msgtype: "markdown_v2",
+      markdown_v2: { content },
     });
   });
 });

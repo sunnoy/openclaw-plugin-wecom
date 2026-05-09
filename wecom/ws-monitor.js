@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import { WSClient, generateReqId } from "@wecom/aibot-node-sdk";
-import { uploadAndSendMedia, buildMediaErrorSummary } from "./media-uploader.js";
+import { uploadAndSendMedia, buildMediaErrorSummary, buildStreamImageMsgItem } from "./media-uploader.js";
 import { createPersistentReqIdStore } from "./reqid-store.js";
 import { agentSendMedia, agentSendText, agentUploadMedia } from "./agent-api.js";
 import { applyOutboundSenderProtocol, resolveOutboundSenderLabel } from "./outbound-sender-protocol.js";
@@ -79,6 +79,7 @@ const MAX_INTERMEDIATE_STREAM_MESSAGES = 85;
 // Keepalive updates every 4 minutes maintain visible progress but do NOT extend
 // the lifetime.  Stream rotation (see rotateStream) is the actual fix.
 const STREAM_KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;
+const STREAM_MSG_ITEM_MAX_IMAGES = 10;
 // Match MEDIA:/FILE: directives at line start, optionally preceded by markdown list markers.
 const REPLY_MEDIA_DIRECTIVE_PATTERN = /^\s*(?:[-*•]\s+|\d+\.\s+)?(?:MEDIA|FILE)\s*:/im;
 const WECOM_REPLY_MEDIA_GUIDANCE_HEADER = "[WeCom reply media rule]";
@@ -543,8 +544,18 @@ function shouldUseMarkdownForActiveSend(content) {
   return true;
 }
 
-function buildWsActiveSendBody(content) {
+function hasRemoteMarkdownImage(content) {
+  return /!\[[^\]]*]\(\s*https?:\/\/[^)\s]+(?:\s+["'][^"']*["'])?\s*\)/i.test(String(content ?? ""));
+}
+
+function buildWsActiveSendBody(content, { forceFormat } = {}) {
   const text = String(content ?? "");
+  if (forceFormat === "markdown_v2" || (!forceFormat && hasRemoteMarkdownImage(text))) {
+    return {
+      msgtype: "markdown_v2",
+      markdown_v2: { content: text },
+    };
+  }
   return {
     msgtype: "markdown",
     markdown: { content: text },
@@ -635,6 +646,22 @@ async function sendMediaBatch({ wsClient, frame, state, account, runtime, config
         : summary;
       continue;
     }
+
+    if ((state.streamMsgItems?.length ?? 0) < STREAM_MSG_ITEM_MAX_IMAGES) {
+      const streamImage = await buildStreamImageMsgItem({
+        mediaUrl: normalizedUrl,
+        mediaLocalRoots,
+        includeDefaultMediaLocalRoots: false,
+      });
+      if (streamImage.ok) {
+        state.streamMsgItems.push(streamImage.msgItem);
+        state.hasMedia = true;
+        state.hasImageMedia = true;
+        logger.info(`[WS] Media attached via stream msg_item: url=${mediaUrl}, type=${streamImage.contentType}`);
+        continue;
+      }
+    }
+
     const result = await uploadAndSendMedia({
       wsClient,
       mediaUrl: normalizedUrl,
@@ -715,6 +742,7 @@ async function finishThinkingStream({ wsClient, frame, state, accountId }) {
     streamId: state.streamId,
     text: finishText,
     finish: true,
+    msgItem: state.streamMsgItems?.length ? state.streamMsgItems : undefined,
     accountId,
   });
 }
@@ -1021,7 +1049,17 @@ export async function sendWsMessage({ to, content, accountId = "default" }) {
     });
   }
 
-  const result = await wsClient.sendMessage(chatId, buildWsActiveSendBody(outbound.content));
+  const body = buildWsActiveSendBody(outbound.content);
+  let result;
+  try {
+    result = await wsClient.sendMessage(chatId, body);
+  } catch (error) {
+    if (body.msgtype !== "markdown_v2") {
+      throw error;
+    }
+    logger.warn(`[WS:${accountId}] markdown_v2 active send failed, falling back to markdown: ${error.message}`);
+    result = await wsClient.sendMessage(chatId, buildWsActiveSendBody(outbound.content, { forceFormat: "markdown" }));
+  }
 
   recordActiveSend({ accountId, chatId });
 
@@ -1459,6 +1497,7 @@ async function processWsMessage({
     streamCreatedAt: Date.now(),
     replyMediaUrls: [],
     pendingMediaUrls: [],
+    streamMsgItems: [],
     hasMedia: false,
     hasImageMedia: false,
     hasFileMedia: false,
@@ -2321,6 +2360,7 @@ export const wsMonitorTesting = {
   splitReplyMediaFromText,
   buildBodyForAgent,
   buildWsActiveSendBody,
+  hasRemoteMarkdownImage,
   resolveOutboundSenderLabel,
   normalizeReplyMediaUrlForLoad,
   flushPendingRepliesViaAgentApi,
