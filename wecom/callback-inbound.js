@@ -341,7 +341,9 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
     // there is no explicit binding, but the account's agentId points to the
     // actual parent agent whose properties the dynamic agent should inherit.
     const baseAgentId = account.config.agentId || routeAgentId;
-    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId);
+    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId, {
+      persistToConfig: account.config.dynamicAgents?.persistToConfig === true,
+    });
     route.sessionKey = route.sessionKey.replace(`agent:${routeAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
   }

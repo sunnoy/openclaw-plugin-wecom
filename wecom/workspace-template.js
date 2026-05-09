@@ -403,7 +403,7 @@ export function upsertAgentIdOnlyEntry(cfg, agentId, baseAgentId) {
   return changed;
 }
 
-export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId) {
+export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId, options = {}) {
   const normalizedId = String(agentId || "")
     .trim()
     .toLowerCase();
@@ -411,11 +411,13 @@ export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId
     return;
   }
 
-  const runtime = getRuntime();
-  const configRuntime = runtime?.config;
-  if (!configRuntime?.writeConfigFile) {
-    return;
+  let configRuntime;
+  try {
+    configRuntime = getRuntime()?.config;
+  } catch {
+    configRuntime = null;
   }
+  const persistToConfig = options?.persistToConfig === true;
 
   const queue = (getEnsureDynamicAgentWriteQueue() || Promise.resolve())
     .then(async () => {
@@ -429,26 +431,38 @@ export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId
       if (changed) {
         logger.info("WeCom: dynamic agent added to in-memory agents.list", { agentId: normalizedId });
 
-        // Persist to disk so `openclaw agents list` (separate process) can see
-        // the dynamic agent and it survives gateway restarts.
-        // Safety check: refuse to write if critical config sections are missing,
-        // which would indicate the in-memory snapshot is incomplete and writing
-        // it would destroy the user's configuration (#136).
-        const hasChannels = openclawConfig.channels && typeof openclawConfig.channels === "object";
-        if (!hasChannels) {
-          logger.warn("WeCom: skipping config write — in-memory config is missing 'channels' section", {
+        // Persisting openclaw.json triggers the gateway config watcher. Keep
+        // the default runtime path in-memory so a first DM does not restart the
+        // gateway while replies are still streaming.
+        if (!persistToConfig) {
+          logger.info("WeCom: dynamic agent config persistence skipped", { agentId: normalizedId });
+        } else if (!configRuntime?.writeConfigFile) {
+          logger.warn("WeCom: dynamic agent config persistence requested but unavailable", {
             agentId: normalizedId,
-            keys: Object.keys(openclawConfig),
           });
         } else {
-          try {
-            await configRuntime.writeConfigFile(openclawConfig);
-            logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
-          } catch (writeErr) {
-            logger.warn("WeCom: failed to persist dynamic agent to config file", {
+          // Persist to disk only when explicitly requested so
+          // `openclaw agents list` (separate process) can see the dynamic agent
+          // and it survives gateway restarts.
+          // Safety check: refuse to write if critical config sections are missing,
+          // which would indicate the in-memory snapshot is incomplete and writing
+          // it would destroy the user's configuration (#136).
+          const hasChannels = openclawConfig.channels && typeof openclawConfig.channels === "object";
+          if (!hasChannels) {
+            logger.warn("WeCom: skipping config write — in-memory config is missing 'channels' section", {
               agentId: normalizedId,
-              error: writeErr?.message || String(writeErr),
+              keys: Object.keys(openclawConfig),
             });
+          } else {
+            try {
+              await configRuntime.writeConfigFile(openclawConfig);
+              logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
+            } catch (writeErr) {
+              logger.warn("WeCom: failed to persist dynamic agent to config file", {
+                agentId: normalizedId,
+                error: writeErr?.message || String(writeErr),
+              });
+            }
           }
         }
       }

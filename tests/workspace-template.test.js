@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   upsertAgentIdOnlyEntry,
+  ensureDynamicAgentListed,
   seedAgentWorkspace,
   clearTemplateMtimeCache,
   resolveAgentWorkspaceDirLocal,
 } from "../wecom/workspace-template.js";
+import { resetStateForTesting, setOpenclawConfig, setRuntime } from "../wecom/state.js";
 
 describe("upsertAgentIdOnlyEntry", () => {
   it("adds heartbeat config when creating a dynamic agent entry", () => {
@@ -146,6 +148,50 @@ describe("upsertAgentIdOnlyEntry", () => {
     assert.equal(entry.model, "claude-haiku-4-20250506");
     assert.deepEqual(entry.subagents, { allow: [] });
     assert.deepEqual(entry.tools, { deny: ["dangerous"] });
+  });
+});
+
+describe("ensureDynamicAgentListed", () => {
+  afterEach(() => {
+    resetStateForTesting();
+  });
+
+  it("updates in-memory agents.list without persisting config by default", async () => {
+    const cfg = {
+      channels: { wecom: {} },
+      agents: { list: [{ id: "main", model: "openai-codex/gpt-5.5" }] },
+    };
+    const writes = [];
+    setOpenclawConfig(cfg);
+    setRuntime({
+      config: {
+        writeConfigFile: async (nextCfg) => writes.push(nextCfg),
+      },
+    });
+
+    await ensureDynamicAgentListed("wecom-dm-lirui", null, "main");
+
+    assert.equal(writes.length, 0);
+    assert.ok(cfg.agents.list.some((entry) => entry.id === "wecom-dm-lirui"));
+  });
+
+  it("persists config only when explicitly requested", async () => {
+    const cfg = {
+      channels: { wecom: {} },
+      agents: { list: [{ id: "main" }] },
+    };
+    const writes = [];
+    setOpenclawConfig(cfg);
+    setRuntime({
+      config: {
+        writeConfigFile: async (nextCfg) => writes.push(nextCfg),
+      },
+    });
+
+    await ensureDynamicAgentListed("wecom-dm-lirui", null, "main", { persistToConfig: true });
+
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0].agents.list.some((entry) => entry.id === "wecom-dm-lirui"));
   });
 });
 

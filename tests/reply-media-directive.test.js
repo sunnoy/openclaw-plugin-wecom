@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   wsMonitorTesting,
   buildReplyMediaGuidance,
+  normalizeReplyPayload,
   resolveReplyMediaLocalRoots,
 } from "../wecom/ws-monitor.js";
 
@@ -13,6 +14,7 @@ const {
   buildBodyForAgent,
   buildWsActiveSendBody,
   hasRemoteMarkdownImage,
+  extractRemoteMarkdownImageUrls,
   normalizeReplyMediaUrlForLoad,
 } = wsMonitorTesting;
 const { resolveOutboundSenderLabel } = wsMonitorTesting;
@@ -128,10 +130,36 @@ describe("buildWsActiveSendBody", () => {
   it("uses markdown_v2 when outbound content contains remote markdown images", () => {
     const content = "步骤如下\n\n![图1](https://example.com/a.png)";
     assert.equal(hasRemoteMarkdownImage(content), true);
+    assert.deepEqual(extractRemoteMarkdownImageUrls(content), ["https://example.com/a.png"]);
     assert.deepEqual(buildWsActiveSendBody(content), {
       msgtype: "markdown_v2",
       markdown_v2: { content },
     });
+  });
+});
+
+describe("normalizeReplyPayload", () => {
+  it("keeps remote markdown images inline instead of duplicating them as reply media", () => {
+    const imageUrl = "https://example.com/a.png";
+    const content = `步骤如下\n\n![图1](${imageUrl})`;
+    const result = normalizeReplyPayload({
+      text: content,
+      mediaUrls: [imageUrl],
+    });
+
+    assert.equal(result.text, content);
+    assert.deepEqual(result.mediaUrls, []);
+  });
+
+  it("keeps remote reply media when it is not already embedded in markdown text", () => {
+    const imageUrl = "https://example.com/a.png";
+    const result = normalizeReplyPayload({
+      text: "图片如下",
+      mediaUrls: [imageUrl],
+    });
+
+    assert.equal(result.text, "图片如下");
+    assert.deepEqual(result.mediaUrls, [imageUrl]);
   });
 });
 

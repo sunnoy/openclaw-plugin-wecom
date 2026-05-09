@@ -1025,6 +1025,39 @@ describe("WS e2e", () => {
     }
   });
 
+  it("preserves passive remote markdown images inline instead of attaching duplicate msg_item media", async () => {
+    const imageUrl = "https://example.com/guide.png";
+    const text = `步骤如下\n\n![设置界面](${imageUrl})`;
+    const harness = await startHarness({
+      replyPayloadFactory: () => ({
+        text,
+        mediaUrls: [imageUrl],
+      }),
+    });
+
+    try {
+      harness.wsClient.emit(
+        "message",
+        createMessageFrame({
+          msgtype: "text",
+          text: { content: "AE330如何恢复出厂设置" },
+        }),
+      );
+
+      const finals = await eventually(() => {
+        const calls = harness.wsClient.replyStreamCalls.filter((c) => c.finish);
+        assert.ok(calls.length >= 1);
+        return calls;
+      });
+      assert.equal(harness.wsClient.uploadMediaCalls.length, 0);
+      assert.equal(harness.wsClient.sendMediaMessageCalls.length, 0);
+      assert.equal(finals[0].msgItem, undefined);
+      assert.ok(finals[0].content.includes(`![设置界面](${imageUrl})`));
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it("falls back to sendMediaMessage for passive reply images beyond the msg_item limit", async () => {
     const workspaceDir = path.join(tempDir, "workspace");
     await mkdir(workspaceDir, { recursive: true });

@@ -548,6 +548,24 @@ function hasRemoteMarkdownImage(content) {
   return /!\[[^\]]*]\(\s*https?:\/\/[^)\s]+(?:\s+["'][^"']*["'])?\s*\)/i.test(String(content ?? ""));
 }
 
+function extractRemoteMarkdownImageUrls(content) {
+  const text = String(content ?? "");
+  const urls = [];
+  const pattern = /!\[[^\]]*]\(\s*(https?:\/\/[^\s)]+)(?:\s+["'][^"']*["'])?\s*\)/gi;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const url = String(match[1] ?? "").trim();
+    if (url) {
+      urls.push(url);
+    }
+  }
+  return urls;
+}
+
+function isRemoteHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value ?? "").trim());
+}
+
 function buildWsActiveSendBody(content, { forceFormat } = {}) {
   const text = String(content ?? "");
   if (forceFormat === "markdown_v2" || (!forceFormat && hasRemoteMarkdownImage(text))) {
@@ -605,10 +623,13 @@ function normalizeReplyPayload(payload) {
     ? [payload.mediaUrl.trim()]
     : [];
   const parsed = splitReplyMediaFromText(payload?.text);
+  const inlineRemoteImageUrls = new Set(extractRemoteMarkdownImageUrls(parsed.text));
+  const mediaUrls = mergeReplyMediaUrls(explicitMediaUrls, explicitMediaUrl, parsed.mediaUrls)
+    .filter((mediaUrl) => !(isRemoteHttpUrl(mediaUrl) && inlineRemoteImageUrls.has(mediaUrl.trim())));
 
   return {
     text: parsed.text,
-    mediaUrls: mergeReplyMediaUrls(explicitMediaUrls, explicitMediaUrl, parsed.mediaUrls),
+    mediaUrls,
   };
 }
 
@@ -1911,7 +1932,9 @@ async function processWsMessage({
     // there is no explicit binding, but the account's agentId points to the
     // actual parent agent whose properties the dynamic agent should inherit.
     const baseAgentId = account.config.agentId || routeAgentId;
-    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId);
+    await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId, {
+      persistToConfig: account.config.dynamicAgents?.persistToConfig === true,
+    });
     route.sessionKey = route.sessionKey.replace(`agent:${routeAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
   }
@@ -2361,6 +2384,7 @@ export const wsMonitorTesting = {
   buildBodyForAgent,
   buildWsActiveSendBody,
   hasRemoteMarkdownImage,
+  extractRemoteMarkdownImageUrls,
   resolveOutboundSenderLabel,
   normalizeReplyMediaUrlForLoad,
   flushPendingRepliesViaAgentApi,

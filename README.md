@@ -147,7 +147,8 @@ npm test
       },
       "dynamicAgents": {
         "enabled": true,
-        "adminBypass": false
+        "adminBypass": false,
+        "persistToConfig": false
       },
       "dm": {
         "createAgentOnFirstMessage": true
@@ -213,6 +214,7 @@ npm test
 | --- | --- | --- | --- |
 | `channels.wecom.dynamicAgents.enabled` | boolean | 否 | 是否启用动态 Agent，默认 `true` |
 | `channels.wecom.dynamicAgents.adminBypass` | boolean | 否 | 管理员是否绕过动态 Agent，默认 `false` |
+| `channels.wecom.dynamicAgents.persistToConfig` | boolean | 否 | 首次创建动态 Agent 时是否写入 `openclaw.json`，默认 `false`。开启后新会话可能触发 gateway 配置重载 |
 | `channels.wecom.dm.createAgentOnFirstMessage` | boolean | 否 | 私聊是否按用户建独立 Agent，默认 `true` |
 | `channels.wecom.groupChat.enabled` | boolean | 否 | 是否启用群聊处理，默认 `true` |
 | `channels.wecom.groupChat.requireMention` | boolean | 否 | 群聊是否要求 @ 才响应，默认 `true` |
