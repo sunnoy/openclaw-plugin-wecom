@@ -78,8 +78,12 @@ export function clearTemplateMtimeCache({ agentSeedCache = true } = {}) {
  */
 export function resolveAgentWorkspaceDirLocal(agentId, config = {}) {
   const normalizedAgentId = normalizeAgentId(agentId);
+  const entries = config?.agents?.entries;
   const list = Array.isArray(config?.agents?.list) ? config.agents.list.filter(Boolean) : [];
-  const agentEntry = list.find((entry) => normalizeAgentId(entry?.id) === normalizedAgentId);
+  const agentEntry =
+    entries && typeof entries === "object" && !Array.isArray(entries)
+      ? entries[normalizedAgentId]
+      : list.find((entry) => normalizeAgentId(entry?.id) === normalizedAgentId);
   const configuredWorkspace = String(agentEntry?.workspace ?? "").trim();
   if (configuredWorkspace) {
     return expandTilde(configuredWorkspace);
@@ -98,6 +102,19 @@ export function resolveAgentWorkspaceDirLocal(agentId, config = {}) {
   }
 
   return join(stateDir, `workspace-${normalizedAgentId}`);
+}
+
+function resolveAgentDirLocal(agentId) {
+  const stateDir =
+    process.env.OPENCLAW_STATE_DIR?.trim() ||
+    join(process.env.HOME || "/root", ".openclaw");
+  return join(stateDir, "agents", normalizeAgentId(agentId), "agent");
+}
+
+function dynamicAgentName(agentId) {
+  const normalizedId = normalizeAgentId(agentId);
+  const match = normalizedId.match(/(?:^|-)dm-(.+)$/) || normalizedId.match(/(?:^|-)group-(.+)$/);
+  return match?.[1] || normalizedId;
 }
 
 /**
@@ -336,6 +353,41 @@ export function upsertAgentIdOnlyEntry(cfg, agentId, baseAgentId) {
     cfg.agents = {};
   }
 
+  const currentEntries = cfg.agents.entries;
+  if (currentEntries && typeof currentEntries === "object" && !Array.isArray(currentEntries)) {
+    const existingEntry = currentEntries[normalizedId];
+    if (existingEntry && typeof existingEntry === "object") {
+      let changed = false;
+      for (const [key, value] of [
+        ["name", dynamicAgentName(normalizedId)],
+        ["workspace", resolveAgentWorkspaceDirLocal(normalizedId, cfg)],
+        ["agentDir", resolveAgentDirLocal(normalizedId)],
+      ]) {
+        if (existingEntry[key] == null) {
+          existingEntry[key] = value;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+
+    const entry = {
+      name: dynamicAgentName(normalizedId),
+      workspace: resolveAgentWorkspaceDirLocal(normalizedId, cfg),
+      agentDir: resolveAgentDirLocal(normalizedId),
+    };
+    const baseEntry = baseAgentId ? currentEntries[baseAgentId] : undefined;
+    if (baseEntry && typeof baseEntry === "object") {
+      for (const key of ["model", "subagents", "tools"]) {
+        if (baseEntry[key] != null) {
+          entry[key] = JSON.parse(JSON.stringify(baseEntry[key]));
+        }
+      }
+    }
+    currentEntries[normalizedId] = entry;
+    return true;
+  }
+
   const currentList = Array.isArray(cfg.agents.list) ? cfg.agents.list : [];
   const existingIds = new Set(
     currentList
@@ -430,39 +482,49 @@ export async function ensureDynamicAgentListed(agentId, templateDir, baseAgentId
       const changed = upsertAgentIdOnlyEntry(openclawConfig, normalizedId, baseAgentId);
       if (changed) {
         logger.info("WeCom: dynamic agent added to in-memory agents.list", { agentId: normalizedId });
+      }
 
-        // Persisting openclaw.json triggers the gateway config watcher. Keep
-        // the default runtime path in-memory so a first DM does not restart the
-        // gateway while replies are still streaming.
-        if (!persistToConfig) {
+      // Always run the focused mutation when persistence is requested. The
+      // in-memory snapshot can outlive a manual edit or a hot reload that
+      // removed the dynamic entry.
+      if (!persistToConfig) {
+        if (changed) {
           logger.info("WeCom: dynamic agent config persistence skipped", { agentId: normalizedId });
-        } else if (!configRuntime?.writeConfigFile) {
-          logger.warn("WeCom: dynamic agent config persistence requested but unavailable", {
+        }
+      } else {
+        // Safety check: refuse to write if critical config sections are missing,
+        // which would indicate the in-memory snapshot is incomplete and writing
+        // it would destroy the user's configuration (#136).
+        const hasChannels = openclawConfig.channels && typeof openclawConfig.channels === "object";
+        if (!hasChannels) {
+          logger.warn("WeCom: skipping config write — in-memory config is missing 'channels' section", {
             agentId: normalizedId,
+            keys: Object.keys(openclawConfig),
           });
         } else {
-          // Persist to disk only when explicitly requested so
-          // `openclaw agents list` (separate process) can see the dynamic agent
-          // and it survives gateway restarts.
-          // Safety check: refuse to write if critical config sections are missing,
-          // which would indicate the in-memory snapshot is incomplete and writing
-          // it would destroy the user's configuration (#136).
-          const hasChannels = openclawConfig.channels && typeof openclawConfig.channels === "object";
-          if (!hasChannels) {
-            logger.warn("WeCom: skipping config write — in-memory config is missing 'channels' section", {
-              agentId: normalizedId,
-              keys: Object.keys(openclawConfig),
-            });
-          } else {
-            try {
+          try {
+            if (configRuntime?.mutateConfigFile) {
+              await configRuntime.mutateConfigFile({
+                afterWrite: { mode: "auto" },
+                mutate: (draft) => {
+                  upsertAgentIdOnlyEntry(draft, normalizedId, baseAgentId);
+                },
+              });
+            } else if (configRuntime?.writeConfigFile) {
               await configRuntime.writeConfigFile(openclawConfig);
-              logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
-            } catch (writeErr) {
-              logger.warn("WeCom: failed to persist dynamic agent to config file", {
+            } else {
+              logger.warn("WeCom: dynamic agent config persistence requested but unavailable", {
                 agentId: normalizedId,
-                error: writeErr?.message || String(writeErr),
               });
             }
+            if (configRuntime?.mutateConfigFile || configRuntime?.writeConfigFile) {
+              logger.info("WeCom: dynamic agent persisted to config file", { agentId: normalizedId });
+            }
+          } catch (writeErr) {
+            logger.warn("WeCom: failed to persist dynamic agent to config file", {
+              agentId: normalizedId,
+              error: writeErr?.message || String(writeErr),
+            });
           }
         }
       }

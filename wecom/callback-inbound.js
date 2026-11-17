@@ -358,7 +358,10 @@ async function processCallbackMessage({ parsedMsg, account, config, runtime }) {
     // actual parent agent whose properties the dynamic agent should inherit.
     const baseAgentId = account.config.agentId || routeAgentId;
     await ensureDynamicAgentListed(dynamicAgentId, account.config.workspaceTemplate, baseAgentId, {
-      persistToConfig: account.config.dynamicAgents?.persistToConfig === true,
+      // Prepared model runtimes are published from the Gateway's persisted
+      // agent configuration. Dispatching immediately after an in-memory-only
+      // mutation leaves a new dynamic agent without a runtime owner.
+      persistToConfig: true,
     });
     route.sessionKey = route.sessionKey.replace(`agent:${routeAgentId}:`, `agent:${dynamicAgentId}:`);
     route.agentId = dynamicAgentId;
